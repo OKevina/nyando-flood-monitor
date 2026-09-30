@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nyando Flood Monitor</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React & ReactDOM -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- Leaflet CSS and JS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f3f4f6; }
+        .map-bg { background: repeating-linear-gradient(0deg, transparent, transparent 49px, #e5e7eb 49px, #e5e7eb 50px), repeating-linear-gradient(90deg, #f9fafb, #f9fafb 49px, #e5e7eb 49px, #e5e7eb 50px); }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        // Custom Icons since lucide-react isn't directly available via CDN easily
+        const MapIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21"></polygon><line x1="9" y1="3" x2="9" y2="18"></line><line x1="15" y1="6" x2="15" y2="21"></line></svg>;
+        const BarChartIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="20" x2="12" y2="10"></line><line x1="18" y1="20" x2="18" y2="4"></line><line x1="6" y1="20" x2="6" y2="16"></line></svg>;
+        const UploadIcon = () => <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>;
+
+        const App = () => {
+            const [activeTab, setActiveTab] = useState('map');
+
+            return (
+                <div className="flex flex-col h-screen bg-gray-50">
+                    {/* Header */}
+                    <header className="bg-gray-900 text-white px-6 py-3 flex justify-between items-center shadow-md">
+                        <div className="font-bold text-xl tracking-tight">Nyando Flood Monitor</div>
+                        <nav className="flex space-x-1">
+                            <button onClick={() => setActiveTab('map')} className={`px-4 py-2 rounded-md flex items-center space-x-2 text-sm font-medium transition-colors ${activeTab === 'map' ? 'bg-gray-800 text-white' : 'text-gray-300 hover:bg-gray-800 hover:text-white'}`}>
+                                <MapIcon /> <span>Map</span>
+                            </button>
+                            <button onClick={() => setActiveTab('analytics')} className={`px-4 py-2 rounded-md flex items-center space-x-2 text-sm font-medium transition-colors ${activeTab === 'analytics' ? 'bg-gray-800 text-white' : 'text-gray-300 hover:bg-gray-800 hover:text-white'}`}>
+                                <BarChartIcon /> <span>Analytics</span>
+                            </button>
+                            <button onClick={() => setActiveTab('upload')} className={`px-4 py-2 rounded-md flex items-center space-x-2 text-sm font-medium transition-colors ${activeTab === 'upload' ? 'bg-gray-800 text-white' : 'text-gray-300 hover:bg-gray-800 hover:text-white'}`}>
+                                <UploadIcon /> <span>Upload</span>
+                            </button>
+                        </nav>
+                    </header>
+
+                    {/* Main Content Area */}
+                    <main className="flex-1 overflow-hidden">
+                        {activeTab === 'map' && <MapView />}
+                        {activeTab === 'analytics' && <AnalyticsView />}
+                        {activeTab === 'upload' && <UploadView />}
+                    </main>
+                </div>
+            );
+        };
+
+        const MapView = () => {
+            const mapRef = React.useRef(null);
+            
+            React.useEffect(() => {
+                if (!mapRef.current) return;
+                
+                const map = L.map(mapRef.current).setView([-0.15, 34.9], 11);
+                
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                    maxZoom: 19,
+                    attribution: '© OpenStreetMap'
+                }).addTo(map);
+                
+                const floodLayer = L.polygon([
+                    [-0.08, 34.82],
+                    [-0.05, 34.95],
+                    [-0.15, 35.05],
+                    [-0.18, 34.95],
+                    [-0.22, 34.85]
+                ], {
+                    color: '#1e40af',
+                    fillColor: '#3b82f6',
+                    fillOpacity: 0.6
+                }).addTo(map);
+                
+                floodLayer.bindPopup("<b>Nyando Basin</b><br>Estimated Flood Extent").openPopup();
+                
+                // Fix for incomplete tile loading in dynamic flexbox layouts
+                setTimeout(() => {
+                    map.invalidateSize();
+                }, 250);
+                
+                return () => {
+                    map.remove();
+                };
+            }, []);
+
+            return (
+                <div className="flex h-full">
+                    {/* Sidebar */}
+                    <div className="w-72 bg-white border-r border-gray-200 p-5 overflow-y-auto shadow-sm z-10 flex flex-col">
+                        
+                        <div className="mb-6">
+                            <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">Event Date</h3>
+                            <select className="w-full border border-gray-300 rounded p-2 text-sm focus:ring-blue-500 focus:border-blue-500">
+                                <option>May 2024</option>
+                                <option>April 2024</option>
+                            </select>
+                        </div>
+    
+                        <div className="mb-6">
+                            <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">Legend</h3>
+                            <div className="space-y-2 text-sm">
+                                <label className="flex items-center space-x-3 cursor-pointer">
+                                    <input type="checkbox" defaultChecked className="form-checkbox h-4 w-4 text-blue-600 rounded" />
+                                    <span className="flex items-center"><div className="w-4 h-4 bg-blue-500 rounded-sm mr-2 opacity-70"></div> Flooded</span>
+                                </label>
+                                <label className="flex items-center space-x-3 cursor-pointer">
+                                    <input type="checkbox" className="form-checkbox h-4 w-4 text-gray-600 rounded" />
+                                    <span className="flex items-center"><div className="w-4 h-4 bg-gray-200 rounded-sm mr-2 border border-gray-300"></div> Non-flooded</span>
+                                </label>
+                            </div>
+                        </div>
+    
+                        <div className="mb-6">
+                            <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">Summary</h3>
+                            <div className="bg-gray-50 p-3 rounded-lg border border-gray-100 space-y-2">
+                                <div className="flex justify-between text-sm">
+                                    <span className="text-gray-600">Inundated area</span>
+                                    <span className="font-semibold text-gray-900">78.4 km²</span>
+                                </div>
+                                <div className="flex justify-between text-sm">
+                                    <span className="text-gray-600">Affected wards</span>
+                                    <span className="font-semibold text-gray-900">5</span>
+                                </div>
+                                <div className="flex justify-between text-sm">
+                                    <span className="text-gray-600">Last updated</span>
+                                    <span className="font-semibold text-gray-900">10 May 2024</span>
+                                </div>
+                            </div>
+                        </div>
+    
+                        <div className="mb-8 flex-1">
+                            <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">Layers</h3>
+                            <div className="space-y-3">
+                                <div className="flex items-center justify-between">
+                                    <span className="text-sm text-gray-700">Flood extent</span>
+                                    <div className="w-10 h-5 bg-blue-600 rounded-full relative cursor-pointer shadow-inner">
+                                        <div className="w-4 h-4 bg-white rounded-full absolute right-0.5 top-0.5 shadow"></div>
+                                    </div>
+                                </div>
+                                <div className="flex items-center justify-between">
+                                    <span className="text-sm text-gray-700">Sentinel-1 SAR</span>
+                                    <div className="w-10 h-5 bg-gray-200 rounded-full relative cursor-pointer shadow-inner">
+                                        <div className="w-4 h-4 bg-white rounded-full absolute left-0.5 top-0.5 shadow"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <button className="w-full bg-gray-900 hover:bg-gray-800 text-white font-medium py-2 px-4 rounded shadow transition-colors mt-auto">
+                            Download Report
+                        </button>
+                    </div>
+                    
+                    {/* Live Leaflet Map Container */}
+                    <div className="flex-1 relative z-0 bg-gray-100" ref={mapRef} style={{ height: '100%', width: '100%' }}>
+                    </div>
+                </div>
+            );
+        };
+
+        const AnalyticsView = () => (
+            <div className="h-full overflow-y-auto bg-gray-50 p-8">
+                <div className="max-w-6xl mx-auto space-y-6">
+                    <div>
+                        <h1 className="text-2xl font-bold text-gray-900">Flood Impact Analytics</h1>
+                        <p className="text-sm text-gray-500">Nyando River Basin · May 2024</p>
+                    </div>
+
+                    {/* KPI Cards */}
+                    <div className="grid grid-cols-4 gap-4">
+                        {[
+                            { label: "Total inundated area", value: "78.4 km²" },
+                            { label: "Affected wards", value: "5" },
+                            { label: "Peak date", value: "May 6" },
+                            { label: "Model version", value: "U-Net v1.2" }
+                        ].map(kpi => (
+                            <div key={kpi.label} className="bg-white p-4 rounded-lg shadow-sm border border-gray-200">
+                                <div className="text-xs text-gray-500 mb-1">{kpi.label}</div>
+                                <div className="text-xl font-semibold text-gray-900">{kpi.value}</div>
+                            </div>
+                        ))}
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-6">
+                        {/* Chart Area */}
+                        <div className="col-span-2 bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+                            <h3 className="text-sm font-bold text-gray-800 mb-4">Inundated area over time (km²)</h3>
+                            <div className="h-72 w-full flex items-end relative pt-4 pb-8 border-b border-l border-gray-200">
+                                {/* Simple CSS mock of a line chart for visual representation */}
+                                <svg viewBox="0 0 100 100" className="w-full h-full overflow-visible" preserveAspectRatio="none">
+                                    <polyline points="0,95 20,80 40,40 60,50 80,70 100,85" fill="none" stroke="#1f2937" strokeWidth="2" />
+                                    <circle cx="0" cy="95" r="2" fill="#1f2937"/>
+                                    <circle cx="20" cy="80" r="2" fill="#1f2937"/>
+                                    <circle cx="40" cy="40" r="2" fill="#1f2937"/>
+                                    <text x="40" y="32" fontSize="3" textAnchor="middle" fill="#6b7280">peak</text>
+                                    <circle cx="60" cy="50" r="2" fill="#1f2937"/>
+                                    <circle cx="80" cy="70" r="2" fill="#1f2937"/>
+                                    <circle cx="100" cy="85" r="2" fill="#1f2937"/>
+                                </svg>
+                                <div className="absolute bottom-2 left-0 text-[10px] text-gray-500">Apr 28</div>
+                                <div className="absolute bottom-2 left-[20%] text-[10px] text-gray-500">May 2</div>
+                                <div className="absolute bottom-2 left-[40%] text-[10px] text-gray-500">May 6</div>
+                                <div className="absolute bottom-2 left-[80%] text-[10px] text-gray-500">May 10</div>
+                                
+                                <div className="absolute -left-6 bottom-[25%] text-[10px] text-gray-500">25</div>
+                                <div className="absolute -left-6 bottom-[50%] text-[10px] text-gray-500">50</div>
+                                <div className="absolute -left-6 bottom-[75%] text-[10px] text-gray-500">75</div>
+                                <div className="absolute -left-8 top-0 text-[10px] text-gray-500">100</div>
+                            </div>
+                        </div>
+
+                        {/* Wards Table */}
+                        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200 flex flex-col">
+                            <h3 className="text-sm font-bold text-gray-800 mb-4">Affected wards</h3>
+                            <div className="flex-1">
+                                <table className="w-full text-sm text-left">
+                                    <thead className="text-xs text-gray-500 bg-gray-50 uppercase border-y border-gray-200">
+                                        <tr>
+                                            <th className="px-2 py-2">Ward</th>
+                                            <th className="px-2 py-2 text-right">% Inundated</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-gray-100">
+                                        <tr><td className="px-2 py-3 text-gray-900">Kabonyo/Kanyagwal</td><td className="px-2 py-3 text-right">42%</td></tr>
+                                        <tr><td className="px-2 py-3 text-gray-900">Kano</td><td className="px-2 py-3 text-right">38%</td></tr>
+                                        <tr><td className="px-2 py-3 text-gray-900">Ahero</td><td className="px-2 py-3 text-right">25%</td></tr>
+                                        <tr><td className="px-2 py-3 text-gray-900">Muhoroni</td><td className="px-2 py-3 text-right">12%</td></tr>
+                                        <tr><td className="px-2 py-3 text-gray-900">Miwani</td><td className="px-2 py-3 text-right">8%</td></tr>
+                                        <tr><td className="px-2 py-3 text-gray-900 text-gray-400">Chemelil/Song</td><td className="px-2 py-3 text-right text-gray-400">0%</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                            <div className="mt-6 flex space-x-3">
+                                <button className="flex-1 bg-gray-900 hover:bg-gray-800 text-white text-sm font-medium py-2 px-4 rounded transition-colors">Export GeoJSON</button>
+                                <button className="flex-1 bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm font-medium py-2 px-4 rounded transition-colors">Export PDF</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        );
+
+        const UploadView = () => (
+            <div className="h-full overflow-y-auto bg-gray-50 p-8">
+                <div className="max-w-5xl mx-auto">
+                    <div className="mb-6">
+                        <h1 className="text-2xl font-bold text-gray-900">Upload Supplementary Aerial Imagery</h1>
+                        <p className="text-sm text-gray-500">Restricted to authorised system administrators</p>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-8">
+                        {/* Upload Form */}
+                        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+                            <div className="space-y-5">
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Image file</label>
+                                    <div className="mt-1 flex justify-center px-6 pt-10 pb-12 border-2 border-gray-300 border-dashed rounded-lg hover:border-gray-400 cursor-pointer bg-gray-50">
+                                        <div className="space-y-2 text-center">
+                                            <svg className="mx-auto h-12 w-12 text-gray-400" stroke="currentColor" fill="none" viewBox="0 0 48 48" aria-hidden="true">
+                                                <path d="M24 14v14m-7-7h14M8 32v4a2 2 0 002 2h28a2 2 0 002-2v-4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                                            </svg>
+                                            <div className="text-sm text-gray-600">
+                                                <span className="font-medium text-blue-600 hover:text-blue-500">Drop image here or browse</span>
+                                            </div>
+                                            <p className="text-xs text-gray-500">GeoTIFF, JPEG, PNG up to 500 MB</p>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Acquisition date *</label>
+                                    <input type="date" className="w-full border border-gray-300 rounded-md p-2 text-sm focus:ring-blue-500 focus:border-blue-500" />
+                                </div>
+                                
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Image source *</label>
+                                    <input type="text" placeholder="e.g. Drone survey, UNOSAT" className="w-full border border-gray-300 rounded-md p-2 text-sm focus:ring-blue-500 focus:border-blue-500" />
+                                </div>
+
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">CRS</label>
+                                    <input type="text" placeholder="e.g. EPSG:4326" className="w-full border border-gray-300 rounded-md p-2 text-sm focus:ring-blue-500 focus:border-blue-500" />
+                                </div>
+
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Description (optional)</label>
+                                    <textarea rows="3" className="w-full border border-gray-300 rounded-md p-2 text-sm focus:ring-blue-500 focus:border-blue-500"></textarea>
+                                </div>
+
+                                <div className="pt-2 flex space-x-3">
+                                    <button className="bg-gray-900 hover:bg-gray-800 text-white font-medium py-2 px-6 rounded shadow transition-colors text-sm">Submit for processing</button>
+                                    <button className="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-medium py-2 px-6 rounded shadow-sm transition-colors text-sm">Clear form</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Status Panels */}
+                        <div className="space-y-6">
+                            {/* Queue */}
+                            <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+                                <h3 className="px-5 py-3 border-b border-gray-200 text-sm font-bold text-gray-800 bg-gray-50">Processing queue</h3>
+                                <ul className="divide-y divide-gray-100 text-sm">
+                                    <li className="flex justify-between items-center px-5 py-3">
+                                        <div><span className="font-medium text-gray-900 block">aerial_may06.tif</span><span className="text-xs text-gray-500">06 May</span></div>
+                                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">complete</span>
+                                    </li>
+                                    <li className="flex justify-between items-center px-5 py-3">
+                                        <div><span className="font-medium text-gray-900 block">survey_may08.jpg</span><span className="text-xs text-gray-500">08 May</span></div>
+                                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">processing</span>
+                                    </li>
+                                    <li className="flex justify-between items-center px-5 py-3">
+                                        <div><span className="font-medium text-gray-900 block">kano_aerial.tif</span><span className="text-xs text-gray-500">09 May</span></div>
+                                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">pending</span>
+                                    </li>
+                                    <li className="flex justify-between items-center px-5 py-3">
+                                        <div><span className="font-medium text-gray-900 block">drone_may10.png</span><span className="text-xs text-gray-500">10 May</span></div>
+                                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">pending</span>
+                                    </li>
+                                </ul>
+                            </div>
+
+                            {/* Log */}
+                            <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+                                <h3 className="px-5 py-3 border-b border-gray-200 text-sm font-bold text-gray-800 bg-gray-50">Pipeline run log</h3>
+                                <div className="p-5 text-sm font-mono text-gray-600 bg-gray-50 h-48 overflow-y-auto">
+                                    <div className="mb-2"><span className="text-gray-400">09 May 14:32</span> <span className="ml-2">Scene acquired from CDSE API</span></div>
+                                    <div className="mb-2"><span className="text-gray-400">09 May 14:34</span> <span className="ml-2">Preprocessing complete</span></div>
+                                    <div className="mb-2"><span className="text-gray-400">09 May 14:36</span> <span className="ml-2">U-Net inference complete</span></div>
+                                    <div className="mb-2"><span className="text-gray-400">09 May 14:37</span> <span className="ml-2">Mask ingested into PostGIS</span></div>
+                                    <div className="mb-2 text-blue-600"><span className="text-gray-400">09 May 14:38</span> <span className="ml-2">Dashboard updated</span></div>
+                                </div>
+                                <div className="px-5 py-3 border-t border-gray-200 flex space-x-3 bg-white">
+                                    <button className="flex-1 bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-xs font-medium py-1.5 px-3 rounded shadow-sm transition-colors">Trigger pipeline run</button>
+                                    <button className="flex-1 bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-xs font-medium py-1.5 px-3 rounded shadow-sm transition-colors">View full log</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        );
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
