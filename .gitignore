@@ -1,0 +1,46 @@
+# ── Python ──────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual Environment ────────────────────
+venv/
+.venv/
+env/
+
+# ── Environment Variables (secrets) ────────
+.env
+!.env.example
+backend/.env
+!backend/.env.example
+
+# ── Data (too large for Git) ───────────────
+data/
+*.tif
+*.tiff
+
+# ── Model Weights (too large for Git) ──────
+models/
+*.pth
+*.pt
+*.onnx
+
+# ── Jupyter Notebooks Checkpoints ──────────
+.ipynb_checkpoints/
+
+# ── IDE ────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── OS ─────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Uploads (runtime generated) ────────────
+backend/uploads/
