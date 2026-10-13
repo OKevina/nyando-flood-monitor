@@ -3,10 +3,12 @@ import uuid
 import asyncpg
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Security, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
+from fastapi.security.api_key import APIKeyHeader
+
 
 load_dotenv()
 
@@ -14,7 +16,16 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localho
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# ── Connection Pool ──────────────────────────────────────────────────────────
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+async def verify_api_key(api_key: str = Security(_api_key_header)):
+    if not ADMIN_API_KEY:
+        raise HTTPException(status_code=500, detail="ADMIN_API_KEY not configured on server.")
+    if api_key != ADMIN_API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid or missing API key.")
+    return api_key
+
+# Connection Pool
 db_pool: asyncpg.Pool = None
 
 
@@ -44,13 +55,13 @@ app.add_middleware(
 )
 
 
-# ── Pydantic Models ──────────────────────────────────────────────────────────
+# Pydantic Models
 class PipelineRunRequest(BaseModel):
     start_date: str
     end_date: str
 
 
-# ── Endpoints ────────────────────────────────────────────────────────────────
+# Endpoints
 
 @app.get("/")
 def read_root():
@@ -159,7 +170,7 @@ async def get_analytics():
         }
 
 
-@app.post("/api/v1/upload_aerial_image")
+@app.post("/api/v1/upload_aerial_image", dependencies=[Depends(verify_api_key)])
 async def upload_aerial_image(
     file: UploadFile = File(...),
     acquisition_date: str = "",
@@ -195,7 +206,7 @@ async def upload_aerial_image(
     }
 
 
-@app.post("/api/v1/trigger_pipeline")
+@app.post("/api/v1/trigger_pipeline", dependencies=[Depends(verify_api_key)])
 def trigger_pipeline(request: PipelineRunRequest):
     """Stub: triggers the CDSE pipeline. Run 02_copernicus_pipeline.py manually for now."""
     return {
