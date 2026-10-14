@@ -89,11 +89,28 @@ async def get_scenes():
 
 
 @app.get("/api/v1/flood_map")
-async def get_flood_map(date: str = Query(None, description="ISO date string e.g. 2024-05-06")):
-    """Returns GeoJSON FeatureCollection of flood extent polygons for a given date."""
+async def get_flood_map(
+    date: str = Query(None, description="ISO date string e.g. 2024-05-06"),
+    bbox: str = Query(None, description="Bounding box: min_lon,min_lat,max_lon,max_lat")
+):
+    """Returns GeoJSON FeatureCollection of flood extent polygons for a given date and optional bounding box."""
+    bbox_coords = None
+    if bbox:
+        try:
+            parts = [float(x.strip()) for x in bbox.split(",")]
+            if len(parts) != 4:
+                raise ValueError
+            bbox_coords = parts  # [min_lon, min_lat, max_lon, max_lat]
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid bbox format. Expected min_lon,min_lat,max_lon,max_lat (e.g. 34.8,-0.3,35.1,0.0)"
+            )
+
     if not db_pool:
         return {
             "type": "FeatureCollection",
+            "bbox_filter": bbox_coords,
             "features": [{
                 "type": "Feature",
                 "properties": {"acquisition_date": date or "2024-05-06", "area_sqkm": 78.4},
@@ -104,32 +121,49 @@ async def get_flood_map(date: str = Query(None, description="ISO date string e.g
                 }
             }]
         }
+
     async with db_pool.acquire() as conn:
-        query = """
+        conditions = ["poly.val >= 1"]
+        params = []
+
+        if date:
+            params.append(date)
+            conditions.append(f"s.acquisition_date::date = ${len(params)}")
+
+        if bbox_coords:
+            min_lon, min_lat, max_lon, max_lat = bbox_coords
+            params.extend([min_lon, min_lat, max_lon, max_lat])
+            p_start = len(params) - 3
+            conditions.append(
+                f"(s.scene_extent IS NULL OR ST_Intersects(s.scene_extent::geometry, ST_MakeEnvelope(${p_start}, ${p_start+1}, ${p_start+2}, ${p_start+3}, 4326)))"
+            )
+
+        where_clause = f"WHERE {' AND '.join(conditions)}"
+
+        query = f"""
             SELECT
                 s.acquisition_date,
                 m.model_version,
-                ST_AsGeoJSON(ST_Union(ST_DumpAsPolygons(m.flood_raster)::geometry))::json AS geojson
+                ST_AsGeoJSON(ST_Union(poly.geom))::json AS geojson
             FROM flood_masks m
             JOIN scenes s ON m.scene_id = s.scene_id
+            CROSS JOIN LATERAL ST_DumpAsPolygons(m.flood_raster) AS poly
+            {where_clause}
+            GROUP BY s.acquisition_date, m.model_version
         """
-        params = []
-        if date:
-            query += " WHERE s.acquisition_date::date = $1"
-            params.append(date)
-        query += " GROUP BY s.acquisition_date, m.model_version"
 
         rows = await conn.fetch(query, *params)
         features = []
         for row in rows:
-            features.append({
-                "type": "Feature",
-                "properties": {
-                    "acquisition_date": row["acquisition_date"].isoformat(),
-                    "model_version": row["model_version"],
-                },
-                "geometry": row["geojson"]
-            })
+            if row["geojson"]:
+                features.append({
+                    "type": "Feature",
+                    "properties": {
+                        "acquisition_date": row["acquisition_date"].isoformat(),
+                        "model_version": row["model_version"],
+                    },
+                    "geometry": row["geojson"]
+                })
         return {"type": "FeatureCollection", "features": features}
 
 
