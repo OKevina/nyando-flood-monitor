@@ -60,3 +60,13 @@ CROSS JOIN LATERAL ST_DumpAsPolygons(m.flood_raster) AS poly
 WHERE poly.val >= 1
 GROUP BY s.acquisition_date, m.model_version
 ORDER BY s.acquisition_date ASC;
+
+
+CREATE TABLE IF NOT EXISTS ward_boundaries (
+    ward_id   SERIAL PRIMARY KEY,
+    ward_name TEXT,
+    county    TEXT,
+    geom      GEOMETRY(MULTIPOLYGON, 4326)
+);
+CREATE INDEX IF NOT EXISTS idx_ward_boundaries_geom
+    ON ward_boundaries USING GIST (geom);
