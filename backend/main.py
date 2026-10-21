@@ -203,6 +203,38 @@ async def get_analytics():
             "time_series": time_series,
         }
 
+@app.get("/api/v1/analytics/wards")
+async def get_ward_analytics():
+    """Return per-ward flooded area (km²) using ST_Intersection."""
+    if db_pool is None:
+        return {"mock": True, "wards": [
+            {"ward_name": "Ahero", "county": "Kisumu", "flooded_area_km2": 4.2},
+            {"ward_name": "Nyando", "county": "Kisumu", "flooded_area_km2": 2.8},
+        ]}
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT
+                w.ward_name,
+                w.county,
+                ROUND(
+                    CAST(
+                        SUM(
+                            ST_Area(
+                                ST_Intersection(w.geom, poly.geom)::geography
+                            ) / 1e6
+                        ) AS numeric
+                    ), 4
+                ) AS flooded_area_km2
+            FROM ward_boundaries w
+            CROSS JOIN LATERAL (
+                SELECT (ST_DumpAsPolygons(m.flood_raster)).geom
+                FROM flood_masks m
+            ) AS poly
+            WHERE ST_Intersects(w.geom, poly.geom)
+            GROUP BY w.ward_name, w.county
+            ORDER BY flooded_area_km2 DESC;
+        """)
+        return {"wards": [dict(r) for r in rows]}
 
 @app.post("/api/v1/upload_aerial_image", dependencies=[Depends(verify_api_key)])
 async def upload_aerial_image(
