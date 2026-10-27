@@ -281,6 +281,23 @@ def trigger_pipeline(request: PipelineRunRequest):
     }
 
 
+@app.get("/api/v1/admin/queue", dependencies=[Depends(verify_api_key)])
+async def get_processing_queue():
+    """Return list of uploaded images and their processing status."""
+    if db_pool is None:
+        return {"mock": True, "queue": [
+            {"image_id": "abc-123", "file_path": "uploads/scene_001.tif", "processing_status": "processed", "upload_timestamp": "2026-10-01T08:00:00Z"},
+            {"image_id": "def-456", "file_path": "uploads/scene_002.tif", "processing_status": "pending",   "upload_timestamp": "2026-10-01T09:30:00Z"},
+        ]}
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT image_id, file_path, processing_status, upload_timestamp
+            FROM uploaded_images
+            ORDER BY upload_timestamp DESC
+            LIMIT 50;
+        """)
+        return {"queue": [dict(r) for r in rows]}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
