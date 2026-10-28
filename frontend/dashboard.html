@@ -274,7 +274,74 @@
             );
         };
 
-        const UploadView = () => (
+        const STATUS_COLORS = {
+            pending:    'bg-gray-100 text-gray-800',
+            processing: 'bg-blue-100 text-blue-800',
+            complete:   'bg-green-100 text-green-800',
+            failed:     'bg-red-100 text-red-800',
+        };
+
+        const UploadView = () => {
+            const fileInputRef = React.useRef(null);
+            const [apiKey,    setApiKey]    = React.useState('');
+            const [file,      setFile]      = React.useState(null);
+            const [acqDate,   setAcqDate]   = React.useState('');
+            const [source,    setSource]    = React.useState('');
+            const [crs,       setCrs]       = React.useState('EPSG:4326');
+            const [desc,      setDesc]      = React.useState('');
+            const [submitting, setSubmitting] = React.useState(false);
+            const [result,    setResult]    = React.useState(null);   // {ok, message}
+            const [queue,     setQueue]     = React.useState([]);
+
+            const fetchQueue = (key) => {
+                if (!key) return;
+                fetch('http://127.0.0.1:8000/api/v1/admin/queue', {
+                    headers: { 'X-API-Key': key }
+                })
+                .then(r => r.json())
+                .then(d => setQueue(d.queue || []))
+                .catch(() => {});
+            };
+
+            React.useEffect(() => { fetchQueue(apiKey); }, [apiKey]);
+
+            const clearForm = () => {
+                setFile(null); setAcqDate(''); setSource('');
+                setCrs('EPSG:4326'); setDesc(''); setResult(null);
+                if (fileInputRef.current) fileInputRef.current.value = '';
+            };
+
+            const handleSubmit = async () => {
+                if (!file)   { setResult({ ok: false, message: 'Please select a file.' }); return; }
+                if (!apiKey) { setResult({ ok: false, message: 'API key is required.' });  return; }
+                setSubmitting(true); setResult(null);
+                const fd = new FormData();
+                fd.append('file', file);
+                fd.append('acquisition_date', acqDate);
+                fd.append('source', source);
+                fd.append('crs', crs);
+                try {
+                    const res = await fetch('http://127.0.0.1:8000/api/v1/upload_aerial_image', {
+                        method: 'POST',
+                        headers: { 'X-API-Key': apiKey },
+                        body: fd,
+                    });
+                    const data = await res.json();
+                    if (res.ok) {
+                        setResult({ ok: true, message: `Uploaded: ${data.filename} (ID: ${data.image_id})` });
+                        clearForm();
+                        fetchQueue(apiKey);
+                    } else {
+                        setResult({ ok: false, message: data.detail || 'Upload failed.' });
+                    }
+                } catch (e) {
+                    setResult({ ok: false, message: 'Network error — is the server running?' });
+                } finally {
+                    setSubmitting(false);
+                }
+            };
+
+            return (
             <div className="h-full overflow-y-auto bg-gray-50 p-8">
                 <div className="max-w-5xl mx-auto">
                     <div className="mb-6">
@@ -286,16 +353,30 @@
                         {/* Upload Form */}
                         <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
                             <div className="space-y-5">
+
+                                {/* API Key */}
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-1">Image file</label>
-                                    <div className="mt-1 flex justify-center px-6 pt-10 pb-12 border-2 border-gray-300 border-dashed rounded-lg hover:border-gray-400 cursor-pointer bg-gray-50">
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Admin API key *</label>
+                                    <input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)}
+                                        placeholder="X-API-Key value"
+                                        className="w-full border border-gray-300 rounded-md p-2 text-sm focus:ring-blue-500 focus:border-blue-500" />
+                                </div>
+
+                                {/* File picker */}
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Image file *</label>
+                                    <input type="file" ref={fileInputRef} accept=".tif,.tiff,.png,.jpg,.jpeg"
+                                        className="hidden"
+                                        onChange={e => setFile(e.target.files[0] || null)} />
+                                    <div onClick={() => fileInputRef.current && fileInputRef.current.click()}
+                                        className="mt-1 flex justify-center px-6 pt-8 pb-10 border-2 border-gray-300 border-dashed rounded-lg hover:border-blue-400 cursor-pointer bg-gray-50">
                                         <div className="space-y-2 text-center">
-                                            <svg className="mx-auto h-12 w-12 text-gray-400" stroke="currentColor" fill="none" viewBox="0 0 48 48" aria-hidden="true">
+                                            <svg className="mx-auto h-10 w-10 text-gray-400" stroke="currentColor" fill="none" viewBox="0 0 48 48">
                                                 <path d="M24 14v14m-7-7h14M8 32v4a2 2 0 002 2h28a2 2 0 002-2v-4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
                                             </svg>
-                                            <div className="text-sm text-gray-600">
-                                                <span className="font-medium text-blue-600 hover:text-blue-500">Drop image here or browse</span>
-                                            </div>
+                                            <p className="text-sm text-blue-600 font-medium">
+                                                {file ? file.name : 'Click to browse'}
+                                            </p>
                                             <p className="text-xs text-gray-500">GeoTIFF, JPEG, PNG up to 500 MB</p>
                                         </div>
                                     </div>
@@ -303,54 +384,76 @@
 
                                 <div>
                                     <label className="block text-sm font-medium text-gray-700 mb-1">Acquisition date *</label>
-                                    <input type="date" className="w-full border border-gray-300 rounded-md p-2 text-sm focus:ring-blue-500 focus:border-blue-500" />
+                                    <input type="date" value={acqDate} onChange={e => setAcqDate(e.target.value)}
+                                        className="w-full border border-gray-300 rounded-md p-2 text-sm focus:ring-blue-500 focus:border-blue-500" />
                                 </div>
-                                
+
                                 <div>
                                     <label className="block text-sm font-medium text-gray-700 mb-1">Image source *</label>
-                                    <input type="text" placeholder="e.g. Drone survey, UNOSAT" className="w-full border border-gray-300 rounded-md p-2 text-sm focus:ring-blue-500 focus:border-blue-500" />
+                                    <input type="text" value={source} onChange={e => setSource(e.target.value)}
+                                        placeholder="e.g. Drone survey, UNOSAT"
+                                        className="w-full border border-gray-300 rounded-md p-2 text-sm focus:ring-blue-500 focus:border-blue-500" />
                                 </div>
 
                                 <div>
                                     <label className="block text-sm font-medium text-gray-700 mb-1">CRS</label>
-                                    <input type="text" placeholder="e.g. EPSG:4326" className="w-full border border-gray-300 rounded-md p-2 text-sm focus:ring-blue-500 focus:border-blue-500" />
+                                    <input type="text" value={crs} onChange={e => setCrs(e.target.value)}
+                                        placeholder="e.g. EPSG:4326"
+                                        className="w-full border border-gray-300 rounded-md p-2 text-sm focus:ring-blue-500 focus:border-blue-500" />
                                 </div>
 
                                 <div>
                                     <label className="block text-sm font-medium text-gray-700 mb-1">Description (optional)</label>
-                                    <textarea rows="3" className="w-full border border-gray-300 rounded-md p-2 text-sm focus:ring-blue-500 focus:border-blue-500"></textarea>
+                                    <textarea rows="2" value={desc} onChange={e => setDesc(e.target.value)}
+                                        className="w-full border border-gray-300 rounded-md p-2 text-sm focus:ring-blue-500 focus:border-blue-500"></textarea>
                                 </div>
 
+                                {result && (
+                                    <div className={`text-sm p-3 rounded-md ${result.ok ? 'bg-green-50 text-green-800 border border-green-200' : 'bg-red-50 text-red-800 border border-red-200'}`}>
+                                        {result.message}
+                                    </div>
+                                )}
+
                                 <div className="pt-2 flex space-x-3">
-                                    <button className="bg-gray-900 hover:bg-gray-800 text-white font-medium py-2 px-6 rounded shadow transition-colors text-sm">Submit for processing</button>
-                                    <button className="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-medium py-2 px-6 rounded shadow-sm transition-colors text-sm">Clear form</button>
+                                    <button onClick={handleSubmit} disabled={submitting}
+                                        className="bg-gray-900 hover:bg-gray-800 disabled:opacity-50 text-white font-medium py-2 px-6 rounded shadow transition-colors text-sm">
+                                        {submitting ? 'Uploading…' : 'Submit for processing'}
+                                    </button>
+                                    <button onClick={clearForm}
+                                        className="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-medium py-2 px-6 rounded shadow-sm transition-colors text-sm">
+                                        Clear form
+                                    </button>
                                 </div>
                             </div>
                         </div>
 
                         {/* Status Panels */}
                         <div className="space-y-6">
-                            {/* Queue */}
                             <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
-                                <h3 className="px-5 py-3 border-b border-gray-200 text-sm font-bold text-gray-800 bg-gray-50">Processing queue</h3>
-                                <ul className="divide-y divide-gray-100 text-sm">
-                                    <li className="flex justify-between items-center px-5 py-3">
-                                        <div><span className="font-medium text-gray-900 block">aerial_may06.tif</span><span className="text-xs text-gray-500">06 May</span></div>
-                                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">complete</span>
-                                    </li>
-                                    <li className="flex justify-between items-center px-5 py-3">
-                                        <div><span className="font-medium text-gray-900 block">survey_may08.jpg</span><span className="text-xs text-gray-500">08 May</span></div>
-                                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">processing</span>
-                                    </li>
-                                    <li className="flex justify-between items-center px-5 py-3">
-                                        <div><span className="font-medium text-gray-900 block">kano_aerial.tif</span><span className="text-xs text-gray-500">09 May</span></div>
-                                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">pending</span>
-                                    </li>
-                                    <li className="flex justify-between items-center px-5 py-3">
-                                        <div><span className="font-medium text-gray-900 block">drone_may10.png</span><span className="text-xs text-gray-500">10 May</span></div>
-                                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">pending</span>
-                                    </li>
-                                </ul>
+                                <div className="px-5 py-3 border-b border-gray-200 flex justify-between items-center bg-gray-50">
+                                    <h3 className="text-sm font-bold text-gray-800">Processing queue</h3>
+                                    <button onClick={() => fetchQueue(apiKey)}
+                                        className="text-xs text-blue-600 hover:underline">Refresh</button>
+                                </div>
+                                {queue.length === 0 ? (
+                                    <p className="px-5 py-4 text-sm text-gray-400">
+                                        {apiKey ? 'Queue is empty.' : 'Enter API key to load queue.'}
+                                    </p>
+                                ) : (
+                                    <ul className="divide-y divide-gray-100 text-sm">
+                                        {queue.map(item => (
+                                            <li key={item.image_id} className="flex justify-between items-center px-5 py-3">
+                                                <div>
+                                                    <span className="font-medium text-gray-900 block">{item.file_path.split(/[\/]/).pop()}</span>
+                                                    <span className="text-xs text-gray-500">{new Date(item.upload_timestamp).toLocaleDateString()}</span>
+                                                </div>
+                                                <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${STATUS_COLORS[item.processing_status] || STATUS_COLORS.pending}`}>
+                                                    {item.processing_status}
+                                                </span>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                )}
                             </div>
 
                             {/* Log */}
@@ -372,7 +475,8 @@
                     </div>
                 </div>
             </div>
-        );
+            );
+        };
 
         const root = ReactDOM.createRoot(document.getElementById('root'));
         root.render(<App />);
