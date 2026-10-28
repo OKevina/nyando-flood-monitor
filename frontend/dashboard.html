@@ -183,13 +183,82 @@
 
         const AnalyticsView = () => {
             const [analytics, setAnalytics] = React.useState(null);
+            const [wards, setWards] = React.useState([]);
+            const [sortField, setSortField] = React.useState('flooded_area_km2');
+            const [sortAsc, setSortAsc] = React.useState(false);
+            const [exportingGeoJSON, setExportingGeoJSON] = React.useState(false);
 
             React.useEffect(() => {
                 fetch('http://127.0.0.1:8000/api/v1/analytics')
                     .then(res => res.json())
                     .then(data => setAnalytics(data))
                     .catch(err => console.error('Analytics fetch failed:', err));
+
+                fetch('http://127.0.0.1:8000/api/v1/analytics/wards')
+                    .then(res => res.json())
+                    .then(data => setWards(data.wards || []))
+                    .catch(err => console.error('Ward analytics fetch failed:', err));
             }, []);
+
+            const sortedWards = React.useMemo(() => {
+                return [...wards].sort((a, b) => {
+                    let valA = a[sortField];
+                    let valB = b[sortField];
+                    if (typeof valA === 'string') {
+                        return sortAsc ? (valA || '').localeCompare(valB || '') : (valB || '').localeCompare(valA || '');
+                    }
+                    valA = Number(valA) || 0;
+                    valB = Number(valB) || 0;
+                    return sortAsc ? valA - valB : valB - valA;
+                });
+            }, [wards, sortField, sortAsc]);
+
+            const toggleSort = (field) => {
+                if (sortField === field) {
+                    setSortAsc(!sortAsc);
+                } else {
+                    setSortField(field);
+                    setSortAsc(false);
+                }
+            };
+
+            const timeSeries = analytics?.time_series || [];
+            const chartData = React.useMemo(() => {
+                if (!timeSeries || timeSeries.length === 0) return null;
+                const maxVal = Math.max(...timeSeries.map(d => Number(d.area_km2) || 0), 1);
+                const niceMax = Math.ceil(maxVal * 1.2) || 10;
+                const points = timeSeries.map((d, i) => {
+                    const x = timeSeries.length === 1 ? 50 : (i / (timeSeries.length - 1)) * 94 + 3;
+                    const val = Number(d.area_km2) || 0;
+                    const y = 92 - (val / niceMax) * 80;
+                    return { ...d, x, y, val };
+                });
+                const polylineStr = points.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+                return { points, polylineStr, niceMax };
+            }, [timeSeries]);
+
+            const handleExportGeoJSON = () => {
+                setExportingGeoJSON(true);
+                fetch('http://127.0.0.1:8000/api/v1/flood_map')
+                    .then(res => res.json())
+                    .then(data => {
+                        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = `nyando_flood_extent_${new Date().toISOString().split('T')[0]}.geojson`;
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        URL.revokeObjectURL(url);
+                    })
+                    .catch(err => alert('Failed to export GeoJSON: ' + err.message))
+                    .finally(() => setExportingGeoJSON(false));
+            };
+
+            const handleExportPDF = () => {
+                window.print();
+            };
 
             return (
             <div className="h-full overflow-y-auto bg-gray-50 p-8">
@@ -215,57 +284,98 @@
                     </div>
 
                     <div className="grid grid-cols-3 gap-6">
-                        {/* Chart Area */}
+                        {/* Dynamic Chart Area */}
                         <div className="col-span-2 bg-white p-6 rounded-lg shadow-sm border border-gray-200">
                             <h3 className="text-sm font-bold text-gray-800 mb-4">Inundated area over time (km²)</h3>
-                            <div className="h-72 w-full flex items-end relative pt-4 pb-8 border-b border-l border-gray-200">
-                                {/* Simple CSS mock of a line chart for visual representation */}
-                                <svg viewBox="0 0 100 100" className="w-full h-full overflow-visible" preserveAspectRatio="none">
-                                    <polyline points="0,95 20,80 40,40 60,50 80,70 100,85" fill="none" stroke="#1f2937" strokeWidth="2" />
-                                    <circle cx="0" cy="95" r="2" fill="#1f2937"/>
-                                    <circle cx="20" cy="80" r="2" fill="#1f2937"/>
-                                    <circle cx="40" cy="40" r="2" fill="#1f2937"/>
-                                    <text x="40" y="32" fontSize="3" textAnchor="middle" fill="#6b7280">peak</text>
-                                    <circle cx="60" cy="50" r="2" fill="#1f2937"/>
-                                    <circle cx="80" cy="70" r="2" fill="#1f2937"/>
-                                    <circle cx="100" cy="85" r="2" fill="#1f2937"/>
-                                </svg>
-                                <div className="absolute bottom-2 left-0 text-[10px] text-gray-500">Apr 28</div>
-                                <div className="absolute bottom-2 left-[20%] text-[10px] text-gray-500">May 2</div>
-                                <div className="absolute bottom-2 left-[40%] text-[10px] text-gray-500">May 6</div>
-                                <div className="absolute bottom-2 left-[80%] text-[10px] text-gray-500">May 10</div>
-                                
-                                <div className="absolute -left-6 bottom-[25%] text-[10px] text-gray-500">25</div>
-                                <div className="absolute -left-6 bottom-[50%] text-[10px] text-gray-500">50</div>
-                                <div className="absolute -left-6 bottom-[75%] text-[10px] text-gray-500">75</div>
-                                <div className="absolute -left-8 top-0 text-[10px] text-gray-500">100</div>
-                            </div>
+                            {!chartData || chartData.points.length === 0 ? (
+                                <div className="h-72 w-full flex items-center justify-center border-b border-l border-gray-200 bg-gray-50/50 text-gray-400 text-sm">
+                                    No time-series data available
+                                </div>
+                            ) : (
+                                <div className="h-72 w-full relative pt-4 pb-8 border-b border-l border-gray-200">
+                                    <svg viewBox="0 0 100 100" className="w-full h-full overflow-visible" preserveAspectRatio="none">
+                                        <line x1="0" y1="25" x2="100" y2="25" stroke="#f3f4f6" strokeWidth="0.8" strokeDasharray="2 2" />
+                                        <line x1="0" y1="50" x2="100" y2="50" stroke="#f3f4f6" strokeWidth="0.8" strokeDasharray="2 2" />
+                                        <line x1="0" y1="75" x2="100" y2="75" stroke="#f3f4f6" strokeWidth="0.8" strokeDasharray="2 2" />
+                                        <polyline
+                                            points={chartData.polylineStr}
+                                            fill="none"
+                                            stroke="#1f2937"
+                                            strokeWidth="2.5"
+                                            strokeLinecap="round"
+                                            strokeLinejoin="round"
+                                        />
+                                        {chartData.points.map((p, idx) => (
+                                            <g key={idx}>
+                                                <circle cx={p.x} cy={p.y} r="2.5" fill="#1f2937" stroke="#ffffff" strokeWidth="1" />
+                                                {p.date === analytics?.peak_date && (
+                                                    <text x={p.x} y={p.y - 4} fontSize="3.5" textAnchor="middle" fill="#4b5563" fontWeight="bold">
+                                                        peak ({p.val} km²)
+                                                    </text>
+                                                )}
+                                            </g>
+                                        ))}
+                                    </svg>
+                                    {chartData.points.map((p, idx) => (
+                                        <div key={idx}
+                                            className="absolute bottom-2 text-[10px] text-gray-500 transform -translate-x-1/2 whitespace-nowrap"
+                                            style={{ left: `${p.x}%` }}>
+                                            {p.date}
+                                        </div>
+                                    ))}
+                                    <div className="absolute -left-8 top-1 text-[10px] text-gray-400">{chartData.niceMax}</div>
+                                    <div className="absolute -left-8 bottom-[50%] text-[10px] text-gray-400">{Math.round(chartData.niceMax / 2)}</div>
+                                    <div className="absolute -left-6 bottom-1 text-[10px] text-gray-400">0</div>
+                                </div>
+                            )}
                         </div>
 
                         {/* Wards Table */}
                         <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200 flex flex-col">
                             <h3 className="text-sm font-bold text-gray-800 mb-4">Affected wards</h3>
-                            <div className="flex-1">
+                            <div className="flex-1 overflow-y-auto max-h-72">
                                 <table className="w-full text-sm text-left">
-                                    <thead className="text-xs text-gray-500 bg-gray-50 uppercase border-y border-gray-200">
+                                    <thead className="text-xs text-gray-500 bg-gray-50 uppercase border-y border-gray-200 sticky top-0">
                                         <tr>
-                                            <th className="px-2 py-2">Ward</th>
-                                            <th className="px-2 py-2 text-right">% Inundated</th>
+                                            <th onClick={() => toggleSort('ward_name')} className="px-2 py-2 cursor-pointer hover:text-gray-900 select-none">
+                                                Ward {sortField === 'ward_name' ? (sortAsc ? '↑' : '↓') : ''}
+                                            </th>
+                                            <th className="px-2 py-2">County</th>
+                                            <th onClick={() => toggleSort('flooded_area_km2')} className="px-2 py-2 text-right cursor-pointer hover:text-gray-900 select-none">
+                                                Flooded (km²) {sortField === 'flooded_area_km2' ? (sortAsc ? '↑' : '↓') : ''}
+                                            </th>
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y divide-gray-100">
-                                        <tr><td className="px-2 py-3 text-gray-900">Kabonyo/Kanyagwal</td><td className="px-2 py-3 text-right">42%</td></tr>
-                                        <tr><td className="px-2 py-3 text-gray-900">Kano</td><td className="px-2 py-3 text-right">38%</td></tr>
-                                        <tr><td className="px-2 py-3 text-gray-900">Ahero</td><td className="px-2 py-3 text-right">25%</td></tr>
-                                        <tr><td className="px-2 py-3 text-gray-900">Muhoroni</td><td className="px-2 py-3 text-right">12%</td></tr>
-                                        <tr><td className="px-2 py-3 text-gray-900">Miwani</td><td className="px-2 py-3 text-right">8%</td></tr>
-                                        <tr><td className="px-2 py-3 text-gray-900 text-gray-400">Chemelil/Song</td><td className="px-2 py-3 text-right text-gray-400">0%</td></tr>
+                                        {sortedWards.length === 0 ? (
+                                            <tr>
+                                                <td colSpan="3" className="px-2 py-4 text-center text-xs text-gray-400">
+                                                    No ward impact data available
+                                                </td>
+                                            </tr>
+                                        ) : (
+                                            sortedWards.map(w => (
+                                                <tr key={w.ward_name} className="hover:bg-gray-50">
+                                                    <td className="px-2 py-3 text-gray-900 font-medium">{w.ward_name}</td>
+                                                    <td className="px-2 py-3 text-gray-500 text-xs">{w.county || 'Kisumu'}</td>
+                                                    <td className="px-2 py-3 text-right font-semibold text-gray-900">
+                                                        {w.flooded_area_km2 !== undefined ? `${w.flooded_area_km2} km²` : '—'}
+                                                    </td>
+                                                </tr>
+                                            ))
+                                        )}
                                     </tbody>
                                 </table>
                             </div>
                             <div className="mt-6 flex space-x-3">
-                                <button className="flex-1 bg-gray-900 hover:bg-gray-800 text-white text-sm font-medium py-2 px-4 rounded transition-colors">Export GeoJSON</button>
-                                <button className="flex-1 bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm font-medium py-2 px-4 rounded transition-colors">Export PDF</button>
+                                <button onClick={handleExportGeoJSON} disabled={exportingGeoJSON}
+                                    className="flex-1 bg-gray-900 hover:bg-gray-800 disabled:opacity-50 text-white text-sm font-medium py-2 px-4 rounded transition-colors">
+                                    {exportingGeoJSON ? 'Exporting…' : 'Export GeoJSON'}
+                                </button>
+                                <button onClick={handleExportPDF}
+                                    className="flex-1 bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm font-medium py-2 px-4 rounded transition-colors">
+                                    Export PDF
+                                </button>
                             </div>
                         </div>
                     </div>
