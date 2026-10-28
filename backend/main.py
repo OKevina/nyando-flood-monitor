@@ -1,3 +1,4 @@
+import json
 import os
 import uuid
 import asyncpg
@@ -162,7 +163,7 @@ async def get_flood_map(
                         "acquisition_date": row["acquisition_date"].isoformat(),
                         "model_version": row["model_version"],
                     },
-                    "geometry": row["geojson"]
+                    "geometry": json.loads(row["geojson"]) if isinstance(row["geojson"], str) else row["geojson"]
                 })
         return {"type": "FeatureCollection", "features": features}
 
@@ -214,7 +215,7 @@ async def get_ward_analytics():
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT
-                w.ward_name,
+                w.ward AS ward_name,
                 w.county,
                 ROUND(
                     CAST(
@@ -231,10 +232,52 @@ async def get_ward_analytics():
                 FROM flood_masks m
             ) AS poly
             WHERE ST_Intersects(w.geom, poly.geom)
-            GROUP BY w.ward_name, w.county
+            GROUP BY w.ward, w.county
             ORDER BY flooded_area_km2 DESC;
         """)
         return {"wards": [dict(r) for r in rows]}
+
+@app.get("/api/v1/wards")
+async def get_wards():
+    """Return GeoJSON FeatureCollection of Kisumu / Nyando ward boundaries."""
+    if db_pool is None:
+        return {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": {"ward_name": "Ahero", "county": "Kisumu"},
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [[[34.88, -0.12], [34.96, -0.10], [34.95, -0.19], [34.87, -0.18], [34.88, -0.12]]]
+                    }
+                },
+                {
+                    "type": "Feature",
+                    "properties": {"ward_name": "Kabonyo/Kanyagwal", "county": "Kisumu"},
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [[[34.80, -0.18], [34.90, -0.17], [34.88, -0.25], [34.78, -0.24], [34.80, -0.18]]]
+                    }
+                }
+            ]
+        }
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT ward AS ward_name, county, ST_AsGeoJSON(geom)::json AS geojson
+            FROM ward_boundaries
+            WHERE county ILIKE '%Kisumu%'
+        """)
+        features = [
+            {
+                "type": "Feature",
+                "properties": {"ward_name": r["ward_name"], "county": r["county"]},
+                "geometry": json.loads(r["geojson"]) if isinstance(r["geojson"], str) else r["geojson"]
+            }
+            for r in rows if r["geojson"]
+        ]
+        return {"type": "FeatureCollection", "features": features}
+
 
 @app.post("/api/v1/upload_aerial_image", dependencies=[Depends(verify_api_key)])
 async def upload_aerial_image(
