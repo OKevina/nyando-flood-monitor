@@ -1,0 +1,39 @@
+name: CI – Pytest Smoke Tests
+
+on:
+  push:
+    branches: ["main", "feat/**", "fix/**", "docs/**"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  test:
+    name: Run API smoke tests
+    runs-on: ubuntu-latest
+
+    # No Postgres service needed — the app falls back to mock mode
+    # when it cannot connect, so tests run fully offline.
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install fastapi uvicorn asyncpg python-multipart python-dotenv
+          pip install httpx pytest pytest-asyncio
+
+      - name: Set test environment variables
+        run: |
+          echo "DATABASE_URL=postgresql://none:none@localhost:5432/none" >> $GITHUB_ENV
+          echo "ADMIN_API_KEY=test-secret-key" >> $GITHUB_ENV
+
+      - name: Run pytest
+        run: pytest tests/ -v --tb=short
