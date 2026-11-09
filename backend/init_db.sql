@@ -70,3 +70,16 @@ CREATE TABLE IF NOT EXISTS ward_boundaries (
 );
 CREATE INDEX IF NOT EXISTS idx_ward_boundaries_geom
     ON ward_boundaries USING GIST (geom);
+
+-- 5. PIPELINE JOBS TABLE
+-- Tracks asynchronous pipeline execution triggered via the API.
+CREATE TABLE IF NOT EXISTS pipeline_jobs (
+    job_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    start_date    DATE NOT NULL,
+    end_date      DATE NOT NULL,
+    status        processing_status_enum DEFAULT 'pending',
+    created_at    TIMESTAMPTZ DEFAULT NOW(),
+    completed_at  TIMESTAMPTZ,
+    error_message TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pipeline_jobs_status ON pipeline_jobs (status);

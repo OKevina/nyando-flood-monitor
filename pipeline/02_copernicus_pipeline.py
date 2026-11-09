@@ -19,8 +19,6 @@ load_dotenv()
 CLIENT_ID = os.getenv("CLIENT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 
-if not CLIENT_ID or not CLIENT_SECRET:
-    raise ValueError("Missing CDSE API credentials in .env file!")
 TOKEN_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
 PROCESS_API_URL = "https://sh.dataspace.copernicus.eu/api/v1/process"
 CATALOG_API_URL = "https://sh.dataspace.copernicus.eu/api/v1/catalog/1.0.0/search"
@@ -28,10 +26,16 @@ CATALOG_API_URL = "https://sh.dataspace.copernicus.eu/api/v1/catalog/1.0.0/searc
 # Nyando Basin Bounding Box [lon_min, lat_min, lon_max, lat_max]
 BBOX = [34.7, -0.3, 35.2, 0.2]
 
+
+def _check_credentials():
+    if not CLIENT_ID or not CLIENT_SECRET:
+        raise ValueError("Missing CDSE API credentials in .env file!")
+
 # ==========================================
 # 1. AUTHENTICATION & CATALOG
 # ==========================================
 def get_cdse_token():
+    _check_credentials()
     payload = {"grant_type": "client_credentials", "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET}
     response = requests.post(TOKEN_URL, data=payload)
     response.raise_for_status()
@@ -295,67 +299,95 @@ def tile_and_filter(sar_tiff, mask_tiff, output_dir, date_str, patch_size=256, o
 # ==========================================
 # PIPELINE EXECUTION
 # ==========================================
-if __name__ == "__main__":
-    PROJECT_DIR = r"C:\Users\KO\Desktop\Sem project"
-    SHAPEFILE_PATH = r"D:\Documents\School\ICS Project 2\FL20240426KEN_SHP\FL20240426KEN_SHP\VIIRS_20240424_20240428_MaximumFloodWaterExtent_Kenya.shp"
-    OUTPUT_TILES_DIR = os.path.join(PROJECT_DIR, "Nyando_Dataset")
-    
-    START_DATE = "2024-04-14"
-    END_DATE = "2024-05-08"
+def run_pipeline_for_date(token, date_str, project_dir, shapefile_path, output_tiles_dir):
+    """Process a single Sentinel-1 scene date end-to-end: download, filter, mask, tile."""
+    print("\n--- Processing Scene: " + date_str + " ---")
+
+    raw_sar_path = os.path.join(project_dir, "nyando_sar_" + date_str + "_raw.tif")
+    filtered_sar_path = os.path.join(project_dir, "nyando_sar_" + date_str + "_filtered.tif")
+    mask_path = os.path.join(project_dir, "nyando_flood_mask_" + date_str + ".tif")
+
+    # Download
+    if not os.path.exists(raw_sar_path):
+        download_rtc_sar_image(token, raw_sar_path, date_str)
+    else:
+        print("[" + date_str + "] Raw SAR already exists, skipping download.")
+
+    # Filter
+    apply_speckle_filter(raw_sar_path, filtered_sar_path, date_str)
+
+    # Mask
+    generate_mask(filtered_sar_path, shapefile_path, mask_path, date_str)
+
+    # Tile & Filter Empty Patches
+    total, retained, avg_pct = tile_and_filter(filtered_sar_path, mask_path, output_tiles_dir, date_str)
+
+    return {
+        "date": date_str,
+        "total": total,
+        "retained": retained,
+        "pct": avg_pct,
+    }
+
+
+def run_pipeline(start_date, end_date, project_dir, shapefile_path, output_tiles_dir, bbox=None, skip_dates=None):
+    """Run the full CDSE pipeline for a date range."""
+    if bbox is None:
+        bbox = BBOX
+    if skip_dates is None:
+        skip_dates = []
 
     print("Authenticating with Copernicus CDSE...")
     token = get_cdse_token()
     print("Authentication successful!")
-    
+
     # 1. Query available dates
-    available_dates = get_available_dates(token, BBOX, START_DATE, END_DATE)
-    
-    # HARD SKIP the buggy 2024-04-24 scene that causes CDSE Process API to deadlock/timeout
-    available_dates = [d for d in available_dates if d != '2024-04-24']
-    
+    available_dates = get_available_dates(token, bbox, start_date, end_date)
+
+    # Filter out skipped dates
+    available_dates = [d for d in available_dates if d not in skip_dates]
+
     # Stats tracking
     stats = []
 
     # 2. Process each date
     for date_str in available_dates:
-        print(f"\n--- Processing Scene: {date_str} ---")
-        
-        raw_sar_path = os.path.join(PROJECT_DIR, f"nyando_sar_{date_str}_raw.tif")
-        filtered_sar_path = os.path.join(PROJECT_DIR, f"nyando_sar_{date_str}_filtered.tif")
-        mask_path = os.path.join(PROJECT_DIR, f"nyando_flood_mask_{date_str}.tif")
-        
-        # Download
-        if not os.path.exists(raw_sar_path):
-            download_rtc_sar_image(token, raw_sar_path, date_str)
-        else:
-            print(f"[{date_str}] Raw SAR already exists, skipping download.")
-            
-        # Filter
-        apply_speckle_filter(raw_sar_path, filtered_sar_path, date_str)
-        
-        # Mask
-        generate_mask(filtered_sar_path, SHAPEFILE_PATH, mask_path, date_str)
-        
-        # Tile & Filter Empty Patches
-        total, retained, avg_pct = tile_and_filter(filtered_sar_path, mask_path, OUTPUT_TILES_DIR, date_str)
-        
-        stats.append({
-            "date": date_str,
-            "total": total,
-            "retained": retained,
-            "pct": avg_pct
-        })
-        
+        result = run_pipeline_for_date(token, date_str, project_dir, shapefile_path, output_tiles_dir)
+        stats.append(result)
+
     # 3. Print Summary Table
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("NYANDO FLOOD EVENT SUMMARY TABLE")
-    print("="*60)
-    print(f"{'Date':<15} | {'Total Patches':<15} | {'Retained (>0.5%)':<18} | {'Avg Flood %':<15}")
+    print("=" * 60)
+    print("{:<15} | {:<15} | {:<18} | {:<15}".format("Date", "Total Patches", "Retained (>0.5%)", "Avg Flood %"))
     print("-" * 60)
     total_dataset_patches = 0
     for s in stats:
-        print(f"{s['date']:<15} | {s['total']:<15} | {s['retained']:<18} | {s['pct']:.2f}%")
-        total_dataset_patches += s['retained']
-    print("="*60)
-    print(f"Total Dataset Size: {total_dataset_patches} training patches.")
-    print("="*60)
+        print("{:<15} | {:<15} | {:<18} | {:.2f}%".format(s["date"], s["total"], s["retained"], s["pct"]))
+        total_dataset_patches += s["retained"]
+    print("=" * 60)
+    print("Total Dataset Size: " + str(total_dataset_patches) + " training patches.")
+    print("=" * 60)
+    return stats
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="CDSE Sentinel-1 pipeline for Nyando Basin")
+    parser.add_argument("--start-date", required=True, help="Start date YYYY-MM-DD")
+    parser.add_argument("--end-date", required=True, help="End date YYYY-MM-DD")
+    parser.add_argument("--project-dir", required=True, help="Output directory for SAR/mask tiles")
+    parser.add_argument("--shapefile-path", required=True, help="Path to VIIRS flood extent shapefile")
+    parser.add_argument("--output-tiles-dir", required=True, help="Directory for tiled training patches")
+    parser.add_argument("--skip-dates", nargs="*", default=[], help="Dates to skip (e.g. 2024-04-24)")
+    args = parser.parse_args()
+
+    run_pipeline(
+        start_date=args.start_date,
+        end_date=args.end_date,
+        project_dir=args.project_dir,
+        shapefile_path=args.shapefile_path,
+        output_tiles_dir=args.output_tiles_dir,
+        skip_dates=args.skip_dates,
+    )

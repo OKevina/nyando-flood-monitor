@@ -9,7 +9,6 @@ Usage:
         --out data/predictions/flood_mask.tif
 """
 import argparse
-import subprocess
 import os
 import numpy as np
 import torch
@@ -114,29 +113,38 @@ def run_inference(scene_path: str, model_path: str, out_path: str, threshold: fl
     print(f"Flood mask saved to {out_path}")
     return out_path
 
-def ingest_to_postgis(tif_path: str, scene_id: int, db_url: str):
-    """Load flood mask raster into PostGIS flood_masks table via raster2pgsql."""
-    print("Ingesting raster into PostGIS...")
-    # raster2pgsql: -a = append, -s 4326 = SRID, -t 256x256 = tile size
-    cmd_raster = [
-        "raster2pgsql", "-a", "-s", "4326", "-t", "256x256",
-        tif_path, "flood_masks"
-    ]
-    cmd_psql = ["psql", db_url]
-    r2p = subprocess.Popen(cmd_raster, stdout=subprocess.PIPE)
-    psql = subprocess.Popen(cmd_psql, stdin=r2p.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    r2p.stdout.close()
-    out, err = psql.communicate()
-    if psql.returncode != 0:
-        print(f"ERROR ingesting raster:\n{err.decode()}")
-    else:
-        print(f"Raster ingested successfully for scene_id={scene_id}")
+async def ingest_to_postgis(tif_path: str, scene_id: str, db_url: str, model_version: str = "U-Net v1.0", threshold: float = 0.5):
+    """Load flood mask raster into PostGIS flood_masks table using asyncpg (no raster2pgsql dependency)."""
+    import asyncpg
+    print("Ingesting raster into PostGIS via asyncpg...")
+    try:
+        with open(tif_path, 'rb') as f:
+            raster_bytes = f.read()
+        conn = await asyncpg.connect(db_url)
+        try:
+            await conn.execute(
+                """
+                INSERT INTO flood_masks (scene_id, model_version, flood_raster, classification_thr)
+                VALUES ($1, $2, ST_FromGDALRaster($3, 'GTiff'), $4)
+                """,
+                scene_id,
+                model_version,
+                raster_bytes,
+                threshold,
+            )
+            print(f"Raster ingested successfully for scene_id={scene_id}")
+        finally:
+            await conn.close()
+    except Exception as e:
+        print(f"ERROR ingesting raster: {e}")
+        raise
 
 # Entry point
 if __name__ == "__main__":
+    import asyncio
     parser = argparse.ArgumentParser(description="U-Net flood inference")
     parser.add_argument("--scene",    required=True,  help="Path to input SAR GeoTIFF (2-band VV+VH)")
-    parser.add_argument("--scene_id", required=True,  type=int, help="Scene ID in DB")
+    parser.add_argument("--scene_id", required=True,  help="Scene ID in DB (UUID string)")
     parser.add_argument("--model",    default="models/nyando_finetuned_model.pth")
     parser.add_argument("--out",      default="data/predictions/flood_mask.tif")
     parser.add_argument("--db",       default=os.getenv("DATABASE_URL", ""), help="PostgreSQL connection string")
@@ -147,7 +155,7 @@ if __name__ == "__main__":
     tif = run_inference(args.scene, args.model, args.out, args.threshold)
 
     if not args.no_ingest and args.db:
-        ingest_to_postgis(tif, args.scene_id, args.db)
+        asyncio.run(ingest_to_postgis(tif, args.scene_id, args.db, threshold=args.threshold))
     elif args.no_ingest:
         print("Skipping PostGIS ingestion (--no-ingest flag set).")
     else:
