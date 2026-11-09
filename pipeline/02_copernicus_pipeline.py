@@ -37,9 +37,18 @@ def _check_credentials():
 def get_cdse_token():
     _check_credentials()
     payload = {"grant_type": "client_credentials", "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET}
-    response = requests.post(TOKEN_URL, data=payload)
-    response.raise_for_status()
-    return response.json()["access_token"]
+    import time
+    last_err = None
+    for attempt in range(5):
+        try:
+            response = requests.post(TOKEN_URL, data=payload, timeout=(30, 60))
+            response.raise_for_status()
+            return response.json()["access_token"]
+        except Exception as e:
+            last_err = e
+            print(f"[auth] token attempt {attempt + 1}/5 failed: {e}")
+            time.sleep(10 + attempt * 10)
+    raise last_err
 
 def get_available_dates(token, bbox, start_date, end_date, min_coverage=0.5):
     """Return pass dates whose scene footprint covers at least `min_coverage`
