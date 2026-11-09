@@ -1,4 +1,18 @@
 import os
+
+# Point PROJ/GDAL at rasterio's bundled data files before any rasterio use.
+# A machine-wide GDAL_DATA/PROJ_LIB may reference an incompatible
+# PostgreSQL/PostGIS install, which breaks CRS lookups with a proj.db error.
+try:
+    import importlib.util as _ilu
+    _spec = _ilu.find_spec("rasterio")
+    if _spec and _spec.submodule_search_locations:
+        _rio = _spec.submodule_search_locations[0]
+        os.environ["PROJ_LIB"] = os.path.join(_rio, "proj_data")
+        os.environ["GDAL_DATA"] = os.path.join(_rio, "gdal_data")
+except Exception:
+    pass
+
 import requests
 import rasterio
 from rasterio.transform import from_bounds
@@ -351,9 +365,15 @@ def run_pipeline_for_date(token, date_str, project_dir, shapefile_path, output_t
     else:
         print("[" + date_str + "] Raw SAR already exists, skipping download.")
 
-    # Skip scenes that are (nearly) all nodata — swath misses or empty RTC products
+    # Skip scenes that are (nearly) all nodata — swath misses or empty RTC
+    # products. Delete the file so the next run re-downloads it: a truncated
+    # or transient-empty download must not be cached forever.
     if not scene_has_valid_data(raw_sar_path):
-        print("[" + date_str + "] Skipping — scene has no valid SAR data.")
+        print("[" + date_str + "] Skipping — scene has no valid SAR data (deleting bad file).")
+        try:
+            os.remove(raw_sar_path)
+        except OSError:
+            pass
         return {"date": date_str, "total": 0, "retained": 0, "pct": 0.0}
 
     # Filter

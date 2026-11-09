@@ -470,9 +470,14 @@ async def run_pipeline_background(job_id: str, start_date: str, end_date: str):
             if not os.path.exists(raw_sar_path):
                 download_rtc_sar_image(token, raw_sar_path, date_str)
 
-            # Skip scenes that are (nearly) all nodata
+            # Skip scenes that are (nearly) all nodata — delete the bad file
+            # so the next run re-downloads instead of caching the failure
             if not scene_has_valid_data(raw_sar_path):
-                print(f"[{date_str}] Skipping — scene has no valid SAR data.")
+                print(f"[{date_str}] Skipping — scene has no valid SAR data (deleting bad file).")
+                try:
+                    os.remove(raw_sar_path)
+                except OSError:
+                    pass
                 _pipeline_jobs[job_id]["message"] = f"{date_str}: no valid SAR data, skipped."
                 continue
 

@@ -10,6 +10,18 @@ Usage:
 """
 import argparse
 import os
+
+# Point PROJ/GDAL at rasterio's bundled data files before any rasterio use.
+try:
+    import importlib.util as _ilu
+    _spec = _ilu.find_spec("rasterio")
+    if _spec and _spec.submodule_search_locations:
+        _rio = _spec.submodule_search_locations[0]
+        os.environ["PROJ_LIB"] = os.path.join(_rio, "proj_data")
+        os.environ["GDAL_DATA"] = os.path.join(_rio, "gdal_data")
+except Exception:
+    pass
+
 import numpy as np
 import torch
 import torch.nn as nn
