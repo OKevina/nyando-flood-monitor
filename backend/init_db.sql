@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS uploaded_images (
 CREATE OR REPLACE VIEW v_flood_impact_analytics AS
 SELECT 
     s.acquisition_date,
-    SUM(ST_Area(poly.geom)) / 1000000.0 AS inundated_area_sqkm,
+    CAST(SUM(ST_Area(poly.geom::geography)) / 1000000.0 AS double precision) AS inundated_area_sqkm,
     m.model_version
 FROM flood_masks m
 JOIN scenes s ON m.scene_id = s.scene_id
