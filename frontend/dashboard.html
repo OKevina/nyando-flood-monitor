@@ -284,23 +284,16 @@
                         {/* Event Date Selector */}
                         <div className="mb-5">
                             <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Event Date</label>
-                            <select 
+                            <input 
+                                type="date"
                                 value={selectedDate} 
                                 onChange={e => setSelectedDate(e.target.value)}
-                                className="w-full border border-gray-300 rounded-md p-2 text-sm bg-white font-medium text-gray-800 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 shadow-sm">
-                                {scenes.length > 0 ? (
-                                    scenes.map(s => {
-                                        const d = s.acquisition_date.split('T')[0];
-                                        return <option key={s.scene_id} value={d}>{d} ({s.orbit_direction || 'SAR'})</option>;
-                                    })
-                                ) : (
-                                    <>
-                                        <option value="2024-05-06">2024-05-06 (Peak flood)</option>
-                                        <option value="2024-04-29">2024-04-29 (Rising)</option>
-                                        <option value="2024-04-17">2024-04-17 (Baseline)</option>
-                                    </>
-                                )}
-                            </select>
+                                className="w-full border border-gray-300 rounded-md p-2 text-sm bg-white text-gray-800 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 shadow-sm"
+                                max={new Date().toISOString().split('T')[0]}
+                            />
+                            {scenes.length > 0 && (
+                                <p className="text-xs text-gray-400 mt-1">Available scenes: {scenes.map(s => s.acquisition_date.split('T')[0]).join(', ')}</p>
+                            )}
                         </div>
 
                         {/* Layer Visibility Toggles */}
