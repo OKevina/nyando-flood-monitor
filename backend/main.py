@@ -408,29 +408,47 @@ async def get_pipeline_status(job_id: str):
 async def run_pipeline_background(job_id: str, start_date: str, end_date: str):
     """Background task: run CDSE pipeline + U-Net inference + PostGIS ingestion for each date."""
     import importlib
-    mod02 = importlib.import_module("pipeline.02_copernicus_pipeline")
-    mod05 = importlib.import_module("pipeline.05_inference")
-    get_cdse_token = mod02.get_cdse_token
-    get_available_dates = mod02.get_available_dates
-    download_rtc_sar_image = mod02.download_rtc_sar_image
-    apply_speckle_filter = mod02.apply_speckle_filter
-    generate_mask = mod02.generate_mask
-    tile_and_filter = mod02.tile_and_filter
-    BBOX = mod02.BBOX
-    run_inference = mod05.run_inference
-    ingest_to_postgis = mod05.ingest_to_postgis
+    import sys
 
-    _pipeline_jobs[job_id]["status"] = "running"
+    # Ensure the repo root is importable so `pipeline.*` modules resolve
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+
+    # Point PROJ/GDAL at rasterio's bundled data files. The machine-wide
+    # GDAL_DATA may reference an incompatible PostgreSQL/PostGIS install,
+    # which breaks rasterio reads/writes with a proj.db version error.
+    import importlib.util
+    rio_spec = importlib.util.find_spec("rasterio")
+    if rio_spec and rio_spec.submodule_search_locations:
+        rio_dir = rio_spec.submodule_search_locations[0]
+        os.environ["PROJ_LIB"] = os.path.join(rio_dir, "proj_data")
+        os.environ["GDAL_DATA"] = os.path.join(rio_dir, "gdal_data")
+
+    _pipeline_jobs[job_id]["status"] = "processing"
     _pipeline_jobs[job_id]["message"] = "Pipeline running..."
 
     if db_pool:
         async with db_pool.acquire() as conn:
             await conn.execute(
-                "UPDATE pipeline_jobs SET status = 'running' WHERE job_id = $1",
+                "UPDATE pipeline_jobs SET status = 'processing' WHERE job_id = $1",
                 uuid.UUID(job_id)
             )
 
     try:
+        mod02 = importlib.import_module("pipeline.02_copernicus_pipeline")
+        mod05 = importlib.import_module("pipeline.05_inference")
+        get_cdse_token = mod02.get_cdse_token
+        get_available_dates = mod02.get_available_dates
+        download_rtc_sar_image = mod02.download_rtc_sar_image
+        apply_speckle_filter = mod02.apply_speckle_filter
+        generate_mask = mod02.generate_mask
+        tile_and_filter = mod02.tile_and_filter
+        BBOX = mod02.BBOX
+        scene_has_valid_data = mod02.scene_has_valid_data
+        run_inference = mod05.run_inference
+        ingest_to_postgis = mod05.ingest_to_postgis
+
         token = get_cdse_token()
         available_dates = get_available_dates(token, BBOX, start_date, end_date)
         available_dates = [d for d in available_dates if d != '2024-04-24']
@@ -452,11 +470,38 @@ async def run_pipeline_background(job_id: str, start_date: str, end_date: str):
             if not os.path.exists(raw_sar_path):
                 download_rtc_sar_image(token, raw_sar_path, date_str)
 
+            # Skip scenes that are (nearly) all nodata
+            if not scene_has_valid_data(raw_sar_path):
+                print(f"[{date_str}] Skipping — scene has no valid SAR data.")
+                _pipeline_jobs[job_id]["message"] = f"{date_str}: no valid SAR data, skipped."
+                continue
+
             # Filter
             apply_speckle_filter(raw_sar_path, filtered_sar_path, date_str)
 
             # Generate weak-label mask (Otsu/VIIRS hybrid)
             generate_mask(filtered_sar_path, shapefile_path, mask_path, date_str)
+
+            # Ensure a scenes row exists for this date so flood_masks FK is satisfied
+            scene_uuid = None
+            if db_pool:
+                import datetime as _dt
+                acq_dt = _dt.datetime.fromisoformat(date_str + "T00:00:00+00:00")
+                async with db_pool.acquire() as conn:
+                    row = await conn.fetchrow(
+                        "SELECT scene_id FROM scenes WHERE acquisition_date::date = $1 ORDER BY ingested_at DESC LIMIT 1",
+                        acq_dt.date()
+                    )
+                    if row:
+                        scene_uuid = row["scene_id"]
+                    else:
+                        row = await conn.fetchrow(
+                            """INSERT INTO scenes (acquisition_date, orbit_direction, scene_extent)
+                               VALUES ($1, 'ASCENDING', ST_MakeEnvelope($2, $3, $4, $5, 4326)::geography)
+                               RETURNING scene_id""",
+                            acq_dt, *BBOX
+                        )
+                        scene_uuid = row["scene_id"]
 
             # Run U-Net inference on the SAR scene
             model_path = os.path.join(os.path.dirname(__file__), "..", "models", "nyando_finetuned_model.pth")
@@ -464,8 +509,8 @@ async def run_pipeline_background(job_id: str, start_date: str, end_date: str):
             run_inference(filtered_sar_path, model_path, pred_path, threshold=0.5)
 
             # Ingest U-Net flood mask into PostGIS
-            if db_pool and DATABASE_URL:
-                await ingest_to_postgis(pred_path, job_id, DATABASE_URL, model_version="U-Net v1.0", threshold=0.5)
+            if db_pool and DATABASE_URL and scene_uuid:
+                await ingest_to_postgis(pred_path, str(scene_uuid), DATABASE_URL, model_version="U-Net v1.0", threshold=0.5)
 
         _pipeline_jobs[job_id]["status"] = "complete"
         _pipeline_jobs[job_id]["message"] = f"Pipeline complete for {len(available_dates)} scenes."

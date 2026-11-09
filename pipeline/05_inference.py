@@ -125,7 +125,7 @@ async def ingest_to_postgis(tif_path: str, scene_id: str, db_url: str, model_ver
             await conn.execute(
                 """
                 INSERT INTO flood_masks (scene_id, model_version, flood_raster, classification_thr)
-                VALUES ($1, $2, ST_FromGDALRaster($3, 'GTiff'), $4)
+                VALUES ($1, $2, ST_FromGDALRaster($3, 4326), $4)
                 """,
                 scene_id,
                 model_version,
