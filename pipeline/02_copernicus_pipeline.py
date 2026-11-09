@@ -41,7 +41,11 @@ def get_cdse_token():
     response.raise_for_status()
     return response.json()["access_token"]
 
-def get_available_dates(token, bbox, start_date, end_date):
+def get_available_dates(token, bbox, start_date, end_date, min_coverage=0.5):
+    """Return pass dates whose scene footprint covers at least `min_coverage`
+    of the AOI. The catalog bbox query returns scenes that only clip the
+    corner of the bbox — their swaths miss the basin and download as
+    all-nodata rasters."""
     print(f"\nQuerying CDSE Catalog for Sentinel-1 scenes over Nyando between {start_date} and {end_date}...")
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = {
@@ -51,17 +55,35 @@ def get_available_dates(token, bbox, start_date, end_date):
     }
     response = requests.post(CATALOG_API_URL, headers=headers, json=payload)
     response.raise_for_status()
-    
+
+    from shapely.geometry import box, shape
+    aoi = box(bbox[0], bbox[1], bbox[2], bbox[3])
+
     features = response.json().get("features", [])
-    dates = set()
+    best_cover = {}
     for f in features:
-        dt = f["properties"]["datetime"]
-        date_str = dt.split("T")[0]
-        dates.add(date_str)
-        
-    sorted_dates = sorted(list(dates))
-    print(f"Found {len(sorted_dates)} available pass dates: {', '.join(sorted_dates)}\n")
+        date_str = f["properties"]["datetime"].split("T")[0]
+        try:
+            cov = aoi.intersection(shape(f["geometry"])).area / aoi.area
+        except Exception:
+            cov = 0.0
+        best_cover[date_str] = max(best_cover.get(date_str, 0.0), cov)
+
+    sorted_dates = sorted(d for d, c in best_cover.items() if c >= min_coverage)
+    skipped = sorted(d for d, c in best_cover.items() if c < min_coverage)
+    print(f"Found {len(sorted_dates)} usable pass dates: {', '.join(sorted_dates)}")
+    if skipped:
+        print(f"Skipped {len(skipped)} dates with <{min_coverage:.0%} AOI coverage: {', '.join(skipped)}\n")
     return sorted_dates
+
+
+def scene_has_valid_data(tif_path, min_valid_frac=0.01):
+    """True if the scene's VV band has at least `min_valid_frac` non-zero pixels.
+    Catches both swath-miss dates and transient empty RTC products."""
+    import rasterio
+    with rasterio.open(tif_path) as src:
+        vv = src.read(1)
+    return float((vv > 0).mean()) >= min_valid_frac
 
 # ==========================================
 # 2. CDSE PROCESS API (RTC DATA)
@@ -140,8 +162,14 @@ def download_rtc_sar_image(token, output_path, date_str):
                     if chunk:
                         f.write(chunk)
                         
-            if os.path.getsize(temp_path) < 100000:
-                raise Exception(f"File too small ({os.path.getsize(temp_path)} bytes), likely corrupted.")
+            # Validate by actually opening the file — a valid but empty
+            # (all-nodata) scene compresses to a tiny TIFF and must not be
+            # rejected by a size heuristic.
+            try:
+                with rasterio.open(temp_path) as _src:
+                    _src.read(1)
+            except Exception:
+                raise Exception("Downloaded file is not a readable GeoTIFF.")
                 
             break
         except Exception as e:
@@ -312,6 +340,11 @@ def run_pipeline_for_date(token, date_str, project_dir, shapefile_path, output_t
         download_rtc_sar_image(token, raw_sar_path, date_str)
     else:
         print("[" + date_str + "] Raw SAR already exists, skipping download.")
+
+    # Skip scenes that are (nearly) all nodata — swath misses or empty RTC products
+    if not scene_has_valid_data(raw_sar_path):
+        print("[" + date_str + "] Skipping — scene has no valid SAR data.")
+        return {"date": date_str, "total": 0, "retained": 0, "pct": 0.0}
 
     # Filter
     apply_speckle_filter(raw_sar_path, filtered_sar_path, date_str)
