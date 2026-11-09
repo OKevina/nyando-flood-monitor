@@ -1,10 +1,11 @@
 import json
 import os
 import uuid
+import asyncio
 import asyncpg
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Security, Depends
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Security, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -28,6 +29,9 @@ async def verify_api_key(api_key: str = Security(_api_key_header)):
 
 # Connection Pool
 db_pool: asyncpg.Pool = None
+
+# In-memory job tracker (falls back to DB table when connected)
+_pipeline_jobs: dict = {}
 
 
 @asynccontextmanager
@@ -60,6 +64,12 @@ app.add_middleware(
 class PipelineRunRequest(BaseModel):
     start_date: str
     end_date: str
+
+
+class PipelineJobResponse(BaseModel):
+    job_id: str
+    status: str
+    message: str
 
 
 # Endpoints
@@ -321,12 +331,134 @@ async def upload_aerial_image(
 
 
 @app.post("/api/v1/trigger_pipeline", dependencies=[Depends(verify_api_key)])
-def trigger_pipeline(request: PipelineRunRequest):
-    """Stub: triggers the CDSE pipeline. Run 02_copernicus_pipeline.py manually for now."""
-    return {
-        "status": "accepted",
-        "message": f"Pipeline trigger acknowledged for {request.start_date} to {request.end_date}."
-    }
+async def trigger_pipeline(request: PipelineRunRequest, background_tasks: BackgroundTasks):
+    """Trigger the CDSE pipeline for a date range. Runs as a background task."""
+    job_id = str(uuid.uuid4())
+
+    # Register job in memory tracker
+    _pipeline_jobs[job_id] = {"status": "pending", "message": "Job queued", "start_date": request.start_date, "end_date": request.end_date}
+
+    # Persist to DB if connected
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO pipeline_jobs (job_id, start_date, end_date, status)
+                   VALUES ($1, $2, $3, 'pending')""",
+                uuid.UUID(job_id), request.start_date, request.end_date
+            )
+
+    # Launch background task
+    background_tasks.add_task(run_pipeline_background, job_id, request.start_date, request.end_date)
+
+    return PipelineJobResponse(
+        job_id=job_id,
+        status="accepted",
+        message=f"Pipeline job {job_id} queued for {request.start_date} to {request.end_date}.",
+    )
+
+
+@app.get("/api/v1/pipeline/status/{job_id}", dependencies=[Depends(verify_api_key)])
+async def get_pipeline_status(job_id: str):
+    """Return the status of a pipeline job."""
+    if job_id in _pipeline_jobs:
+        job = _pipeline_jobs[job_id]
+        return {"job_id": job_id, "status": job["status"], "message": job.get("message", "")}
+
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT status, error_message FROM pipeline_jobs WHERE job_id = $1",
+                uuid.UUID(job_id)
+            )
+            if row:
+                return {"job_id": job_id, "status": row["status"], "message": row["error_message"] or ""}
+
+    raise HTTPException(status_code=404, detail="Job not found")
+
+
+async def run_pipeline_background(job_id: str, start_date: str, end_date: str):
+    """Background task: run CDSE pipeline + U-Net inference + PostGIS ingestion for each date."""
+    import importlib
+    mod02 = importlib.import_module("pipeline.02_copernicus_pipeline")
+    mod05 = importlib.import_module("pipeline.05_inference")
+    get_cdse_token = mod02.get_cdse_token
+    get_available_dates = mod02.get_available_dates
+    download_rtc_sar_image = mod02.download_rtc_sar_image
+    apply_speckle_filter = mod02.apply_speckle_filter
+    generate_mask = mod02.generate_mask
+    tile_and_filter = mod02.tile_and_filter
+    BBOX = mod02.BBOX
+    run_inference = mod05.run_inference
+    ingest_to_postgis = mod05.ingest_to_postgis
+
+    _pipeline_jobs[job_id]["status"] = "running"
+    _pipeline_jobs[job_id]["message"] = "Pipeline running..."
+
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE pipeline_jobs SET status = 'running' WHERE job_id = $1",
+                uuid.UUID(job_id)
+            )
+
+    try:
+        token = get_cdse_token()
+        available_dates = get_available_dates(token, BBOX, start_date, end_date)
+        available_dates = [d for d in available_dates if d != '2024-04-24']
+
+        project_dir = os.path.join(os.path.dirname(__file__), "..", "data", "scenes")
+        output_tiles_dir = os.path.join(os.path.dirname(__file__), "..", "data", "Nyando_Dataset")
+        shapefile_path = os.path.join(os.path.dirname(__file__), "..", "data", "raw", "VIIRS_20240424_20240428_MaximumFloodWaterExtent_Kenya.shp")
+        os.makedirs(project_dir, exist_ok=True)
+
+        for date_str in available_dates:
+            _pipeline_jobs[job_id]["message"] = f"Processing {date_str}..."
+            print(f"[Job {job_id}] Processing {date_str}...")
+
+            raw_sar_path = os.path.join(project_dir, f"nyando_sar_{date_str}_raw.tif")
+            filtered_sar_path = os.path.join(project_dir, f"nyando_sar_{date_str}_filtered.tif")
+            mask_path = os.path.join(project_dir, f"nyando_flood_mask_{date_str}.tif")
+
+            # Download SAR
+            if not os.path.exists(raw_sar_path):
+                download_rtc_sar_image(token, raw_sar_path, date_str)
+
+            # Filter
+            apply_speckle_filter(raw_sar_path, filtered_sar_path, date_str)
+
+            # Generate weak-label mask (Otsu/VIIRS hybrid)
+            generate_mask(filtered_sar_path, shapefile_path, mask_path, date_str)
+
+            # Run U-Net inference on the SAR scene
+            model_path = os.path.join(os.path.dirname(__file__), "..", "models", "nyando_finetuned_model.pth")
+            pred_path = os.path.join(project_dir, f"nyando_flood_mask_unet_{date_str}.tif")
+            run_inference(filtered_sar_path, model_path, pred_path, threshold=0.5)
+
+            # Ingest U-Net flood mask into PostGIS
+            if db_pool and DATABASE_URL:
+                await ingest_to_postgis(pred_path, job_id, DATABASE_URL, model_version="U-Net v1.0", threshold=0.5)
+
+        _pipeline_jobs[job_id]["status"] = "complete"
+        _pipeline_jobs[job_id]["message"] = f"Pipeline complete for {len(available_dates)} scenes."
+
+        if db_pool:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE pipeline_jobs SET status = 'complete', completed_at = NOW() WHERE job_id = $1",
+                    uuid.UUID(job_id)
+                )
+
+    except Exception as e:
+        _pipeline_jobs[job_id]["status"] = "failed"
+        _pipeline_jobs[job_id]["message"] = str(e)
+        print(f"[Job {job_id}] FAILED: {e}")
+
+        if db_pool:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE pipeline_jobs SET status = 'failed', error_message = $2, completed_at = NOW() WHERE job_id = $1",
+                    uuid.UUID(job_id), str(e)
+                )
 
 
 @app.get("/api/v1/admin/queue", dependencies=[Depends(verify_api_key)])
