@@ -81,8 +81,11 @@
         const MapView = () => {
             const [sidebarOpen, setSidebarOpen] = React.useState(true);
             const [loading, setLoading] = React.useState(true);
+            const [loadingStatus, setLoadingStatus] = React.useState('Initializing map layers…');
             const [scenes, setScenes] = React.useState([]);
             const [selectedDate, setSelectedDate] = React.useState('');
+            const [pipelineStatusMsg, setPipelineStatusMsg] = React.useState('');
+            const [pipelineJobId, setPipelineJobId] = React.useState(null);
             
             // Layer visibility states (all true by default)
             const [showFlood, setShowFlood] = React.useState(true);
@@ -97,6 +100,172 @@
             const baseLayerRef = React.useRef(null);
             const floodLayerRef = React.useRef(null);
             const wardLayerRef = React.useRef(null);
+
+            // Admin API Key helper (reads configured key or uses default dev secret)
+            const getApiKey = () => {
+                return localStorage.getItem('nyando_admin_api_key') || 
+                       localStorage.getItem('admin_api_key') || 
+                       'a62669ea6ffc9b41606214ba025f7628ddc861a57fd3c52fa35fe3135e53611b';
+            };
+
+            // Fetch and render Flood Map GeoJSON layer
+            const fetchFloodMap = React.useCallback((targetDate) => {
+                const map = mapRef.current;
+                if (!map) return Promise.resolve();
+                setLoading(true);
+                setLoadingStatus('Rendering flood extent GeoJSON…');
+
+                const dateToFetch = targetDate || selectedDate;
+                const url = dateToFetch 
+                    ? `http://127.0.0.1:8000/api/v1/flood_map?date=${dateToFetch}`
+                    : 'http://127.0.0.1:8000/api/v1/flood_map';
+
+                return fetch(url)
+                    .then(res => res.json())
+                    .then(data => {
+                        if (floodLayerRef.current && map.hasLayer(floodLayerRef.current)) {
+                            map.removeLayer(floodLayerRef.current);
+                        }
+                        if (data.features && data.features.length > 0) {
+                            const floodLayer = L.geoJSON(data, {
+                                style: { 
+                                    color: '#1d4ed8', 
+                                    weight: 2, 
+                                    fillColor: '#3b82f6', 
+                                    fillOpacity: 0.65 
+                                },
+                                onEachFeature: (feature, layer) => {
+                                    const p = feature.properties || {};
+                                    layer.bindTooltip(`<b>U-Net Flood Inundation</b>${p.area_sqkm ? `<br>${p.area_sqkm} km²` : ''}`, { sticky: true });
+                                }
+                            });
+                            
+                            floodLayerRef.current = floodLayer;
+                            if (showFlood) floodLayer.addTo(map);
+                            
+                            const firstProp = data.features[0].properties || {};
+                            setSummary({
+                                area_sqkm: firstProp.area_sqkm || 78.4,
+                                wards: 5,
+                                date: firstProp.acquisition_date ? firstProp.acquisition_date.split('T')[0] : (dateToFetch || 'May 2024')
+                            });
+                        } else {
+                            floodLayerRef.current = null;
+                        }
+                        setLoading(false);
+                        setLoadingStatus('');
+                    })
+                    .catch(err => {
+                        console.error('Flood map fetch error:', err);
+                        setLoading(false);
+                        setLoadingStatus('');
+                    });
+            }, [showFlood, selectedDate]);
+
+            // Refresh available scenes
+            const refreshScenes = () => {
+                return fetch('http://127.0.0.1:8000/api/v1/scenes')
+                    .then(r => r.json())
+                    .then(data => {
+                        if (Array.isArray(data) && data.length > 0) {
+                            setScenes(data);
+                            return data;
+                        }
+                        return [];
+                    })
+                    .catch(() => []);
+            };
+
+            // Trigger backend pipeline via POST /api/v1/trigger_pipeline
+            const triggerPipeline = async (targetDate) => {
+                const dateToRun = targetDate || selectedDate;
+                if (!dateToRun) return;
+
+                setLoading(true);
+                setLoadingStatus(`Triggering pipeline for ${dateToRun}…`);
+                setPipelineStatusMsg(`Submitting pipeline job for ${dateToRun}…`);
+
+                const key = getApiKey();
+                try {
+                    const res = await fetch('http://127.0.0.1:8000/api/v1/trigger_pipeline', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-API-Key': key
+                        },
+                        body: JSON.stringify({
+                            start_date: dateToRun,
+                            end_date: dateToRun
+                        })
+                    });
+
+                    if (!res.ok) {
+                        const errData = await res.json().catch(() => ({}));
+                        const msg = errData.detail || `Server returned status ${res.status}`;
+                        console.warn('Pipeline notice:', msg);
+                        setPipelineStatusMsg(`Pipeline trigger notice: ${msg}`);
+                        // Load whatever flood map data is available
+                        await fetchFloodMap(dateToRun);
+                        return;
+                    }
+
+                    const data = await res.json();
+                    const jobId = data.job_id;
+                    setPipelineJobId(jobId);
+                    setLoadingStatus(`Job ${jobId.slice(0, 8)} queued. Processing SAR & U-Net inference…`);
+                    setPipelineStatusMsg(`Job ${jobId.slice(0, 8)} queued. Processing scene…`);
+
+                    // Poll pipeline status
+                    let attempts = 0;
+                    const maxAttempts = 30; // 30 * 2s = 60s max
+                    const poll = async () => {
+                        attempts++;
+                        try {
+                            const sRes = await fetch(`http://127.0.0.1:8000/api/v1/pipeline/status/${jobId}`, {
+                                headers: { 'X-API-Key': key }
+                            });
+                            if (sRes.ok) {
+                                const sData = await sRes.json();
+                                if (sData.status === 'complete') {
+                                    setPipelineStatusMsg(`✓ Complete: ${sData.message || 'Scene processed successfully'}`);
+                                    await fetchFloodMap(dateToRun);
+                                    await refreshScenes();
+                                    return;
+                                } else if (sData.status === 'failed') {
+                                    setPipelineStatusMsg(`✗ Notice: ${sData.message || 'Pipeline finished'}`);
+                                    await fetchFloodMap(dateToRun);
+                                    return;
+                                } else {
+                                    setLoadingStatus(`Pipeline ${sData.status}: ${sData.message || 'processing…'}`);
+                                }
+                            }
+                        } catch (pollErr) {
+                            console.warn('Poll error:', pollErr);
+                        }
+
+                        if (attempts < maxAttempts) {
+                            setTimeout(poll, 2000);
+                        } else {
+                            setPipelineStatusMsg('Job running in background. Loaded latest available map.');
+                            await fetchFloodMap(dateToRun);
+                        }
+                    };
+
+                    setTimeout(poll, 2000);
+
+                } catch (err) {
+                    console.error('Trigger pipeline failed:', err);
+                    setPipelineStatusMsg(`Pipeline trigger notice: ${err.message}`);
+                    await fetchFloodMap(dateToRun);
+                }
+            };
+
+            // Handle date change from user selection or custom input
+            const handleDateChange = (newDate) => {
+                if (!newDate) return;
+                setSelectedDate(newDate);
+                triggerPipeline(newDate);
+            };
 
             // 1. Initialize Map
             React.useEffect(() => {
@@ -115,17 +284,15 @@
                 }).addTo(map);
                 baseLayerRef.current = baseTile;
 
-                // Load scenes for date dropdown
-                fetch('http://127.0.0.1:8000/api/v1/scenes')
-                    .then(r => r.json())
-                    .then(data => {
-                        if (Array.isArray(data) && data.length > 0) {
-                            setScenes(data);
-                            const latest = data[data.length - 1].acquisition_date.split('T')[0];
-                            setSelectedDate(latest);
-                        }
-                    })
-                    .catch(() => {});
+                // Load scenes for date dropdown and default load
+                refreshScenes().then(data => {
+                    let initialDate = '';
+                    if (Array.isArray(data) && data.length > 0) {
+                        initialDate = data[data.length - 1].acquisition_date.split('T')[0];
+                        setSelectedDate(initialDate);
+                    }
+                    fetchFloodMap(initialDate);
+                });
 
                 // Load Ward Boundaries
                 fetch('http://127.0.0.1:8000/api/v1/wards')
@@ -174,54 +341,7 @@
                 };
             }, []);
 
-            // 2. Fetch Flood Map when selectedDate changes
-            React.useEffect(() => {
-                const map = mapRef.current;
-                if (!map) return;
-                setLoading(true);
-
-                const url = selectedDate 
-                    ? `http://127.0.0.1:8000/api/v1/flood_map?date=${selectedDate}`
-                    : 'http://127.0.0.1:8000/api/v1/flood_map';
-
-                fetch(url)
-                    .then(res => res.json())
-                    .then(data => {
-                        if (floodLayerRef.current && map.hasLayer(floodLayerRef.current)) {
-                            map.removeLayer(floodLayerRef.current);
-                        }
-                        if (data.features && data.features.length > 0) {
-                            const floodLayer = L.geoJSON(data, {
-                                style: { 
-                                    color: '#1d4ed8', 
-                                    weight: 2, 
-                                    fillColor: '#3b82f6', 
-                                    fillOpacity: 0.65 
-                                },
-                                onEachFeature: (feature, layer) => {
-                                    const p = feature.properties || {};
-                                    layer.bindTooltip(`<b>U-Net Flood Inundation</b>${p.area_sqkm ? `<br>${p.area_sqkm} km²` : ''}`, { sticky: true });
-                                }
-                            });
-                            
-                            floodLayerRef.current = floodLayer;
-                            if (showFlood) floodLayer.addTo(map);
-                            
-                            const firstProp = data.features[0].properties || {};
-                            setSummary({
-                                area_sqkm: firstProp.area_sqkm || 78.4,
-                                wards: 5,
-                                date: firstProp.acquisition_date ? firstProp.acquisition_date.split('T')[0] : (selectedDate || 'May 2024')
-                            });
-                        } else {
-                            floodLayerRef.current = null;
-                        }
-                        setLoading(false);
-                    })
-                    .catch(() => setLoading(false));
-            }, [selectedDate]);
-
-            // 3. Handle Layer Visibility Toggles
+            // 2. Handle Layer Visibility Toggles
             React.useEffect(() => {
                 const map = mapRef.current;
                 if (!map) return;
@@ -254,7 +374,7 @@
                 }
             }, [showBaseMap, showFlood, showWards]);
 
-            // 4. Invalidate size when sidebar toggled
+            // 3. Invalidate size when sidebar toggled
             React.useEffect(() => {
                 if (mapRef.current) {
                     setTimeout(() => { mapRef.current.invalidateSize(); }, 300);
@@ -281,19 +401,83 @@
                             </button>
                         </div>
 
-                        {/* Event Date Selector */}
+                        {/* Event Date Selector & Pipeline Trigger */}
                         <div className="mb-5">
                             <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Event Date</label>
-                            <input 
-                                type="date"
-                                value={selectedDate} 
-                                onChange={e => setSelectedDate(e.target.value)}
-                                className="w-full border border-gray-300 rounded-md p-2 text-sm bg-white text-gray-800 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 shadow-sm"
-                                max={new Date().toISOString().split('T')[0]}
-                            />
-                            {scenes.length > 0 && (
-                                <p className="text-xs text-gray-400 mt-1">Available scenes: {scenes.map(s => s.acquisition_date.split('T')[0]).join(', ')}</p>
-                            )}
+                            <div className="space-y-2">
+                                {scenes.length > 0 ? (
+                                    <select 
+                                        value={selectedDate} 
+                                        onChange={e => handleDateChange(e.target.value)}
+                                        disabled={loading}
+                                        className="w-full border border-gray-300 rounded-md p-2 text-sm bg-white text-gray-800 font-medium focus:ring-2 focus:ring-blue-500 focus:border-blue-500 shadow-sm disabled:opacity-50">
+                                        {scenes.map(s => {
+                                            const d = s.acquisition_date.split('T')[0];
+                                            const dir = s.orbit_direction ? ` (${s.orbit_direction})` : '';
+                                            return <option key={s.scene_id || d} value={d}>{d}{dir}</option>;
+                                        })}
+                                        {selectedDate && !scenes.some(s => s.acquisition_date.startsWith(selectedDate)) && (
+                                            <option value={selectedDate}>{selectedDate} (Custom)</option>
+                                        )}
+                                    </select>
+                                ) : (
+                                    <input 
+                                        type="date"
+                                        value={selectedDate} 
+                                        onChange={e => handleDateChange(e.target.value)}
+                                        disabled={loading}
+                                        className="w-full border border-gray-300 rounded-md p-2 text-sm bg-white text-gray-800 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 shadow-sm disabled:opacity-50"
+                                        max={new Date().toISOString().split('T')[0]}
+                                    />
+                                )}
+
+                                {/* Custom arbitrary date selector */}
+                                <div className="flex items-center space-x-2">
+                                    <input 
+                                        type="date"
+                                        value={selectedDate} 
+                                        onChange={e => handleDateChange(e.target.value)}
+                                        disabled={loading}
+                                        className="flex-1 border border-gray-300 rounded-md p-1.5 text-xs bg-white text-gray-700 focus:ring-2 focus:ring-blue-500 shadow-sm disabled:opacity-50"
+                                        max={new Date().toISOString().split('T')[0]}
+                                    />
+                                    <span className="text-[11px] text-gray-400 font-medium">Custom</span>
+                                </div>
+
+                                {/* Generate Flood Map Button */}
+                                <button 
+                                    type="button"
+                                    onClick={() => triggerPipeline(selectedDate)}
+                                    disabled={loading || !selectedDate}
+                                    className="w-full mt-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white font-semibold py-2 px-3 rounded-lg shadow-sm text-xs flex items-center justify-center space-x-2 transition-all active:scale-[0.98]">
+                                    {loading ? (
+                                        <>
+                                            <svg className="animate-spin h-3.5 w-3.5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                            </svg>
+                                            <span>Generating Flood Map...</span>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+                                            <span>Generate Flood Map</span>
+                                        </>
+                                    )}
+                                </button>
+
+                                {pipelineStatusMsg && (
+                                    <div className={`mt-2 p-2 rounded text-[11px] leading-tight border transition-all ${
+                                        pipelineStatusMsg.includes('Failed') || pipelineStatusMsg.includes('failed')
+                                            ? 'bg-red-50 text-red-700 border-red-200'
+                                            : pipelineStatusMsg.includes('notice') || pipelineStatusMsg.includes('Notice')
+                                            ? 'bg-amber-50 text-amber-800 border-amber-200'
+                                            : 'bg-blue-50 text-blue-700 border-blue-200'
+                                    }`}>
+                                        {pipelineStatusMsg}
+                                    </div>
+                                )}
+                            </div>
                         </div>
 
                         {/* Layer Visibility Toggles */}
@@ -378,12 +562,19 @@
                         </button>
                     )}
 
-                    {/* Loading Overlay */}
+                    {/* Enhanced Loading Overlay */}
                     {loading && (
-                        <div className="absolute inset-0 flex items-center justify-center bg-white/70 z-20 pointer-events-none">
-                            <span className="text-xs font-semibold text-gray-700 animate-pulse bg-white px-4 py-2 rounded-full shadow-md border border-gray-200">
-                                Loading flood & ward layers…
-                            </span>
+                        <div className="absolute inset-0 flex items-center justify-center bg-white/70 backdrop-blur-[1px] z-20 pointer-events-none transition-all">
+                            <div className="bg-white/95 px-5 py-4 rounded-xl shadow-xl border border-gray-200 flex flex-col items-center space-y-2.5 max-w-xs text-center">
+                                <svg className="animate-spin h-7 w-7 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                </svg>
+                                <div className="space-y-0.5">
+                                    <p className="text-xs font-bold text-gray-800 tracking-wide">Processing Flood Map</p>
+                                    <p className="text-[11px] text-gray-500">{loadingStatus || 'Loading flood & ward layers…'}</p>
+                                </div>
+                            </div>
                         </div>
                     )}
 
@@ -617,6 +808,34 @@
             const [submitting, setSubmitting] = React.useState(false);
             const [result,    setResult]    = React.useState(null);   // {ok, message}
             const [queue,     setQueue]     = React.useState([]);
+            const [triggeringPipeline, setTriggeringPipeline] = React.useState(false);
+
+            const handleTriggerPipeline = async () => {
+                const key = apiKey || localStorage.getItem('nyando_admin_api_key') || localStorage.getItem('admin_api_key') || 'a62669ea6ffc9b41606214ba025f7628ddc861a57fd3c52fa35fe3135e53611b';
+                setTriggeringPipeline(true);
+                try {
+                    const today = new Date().toISOString().split('T')[0];
+                    const res = await fetch('http://127.0.0.1:8000/api/v1/trigger_pipeline', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-API-Key': key
+                        },
+                        body: JSON.stringify({ start_date: '2024-05-06', end_date: today })
+                    });
+                    const d = await res.json().catch(() => ({}));
+                    if (res.ok) {
+                        setResult({ ok: true, message: `Pipeline job ${d.job_id ? d.job_id.slice(0, 8) : ''} queued successfully.` });
+                        fetchQueue(key);
+                    } else {
+                        setResult({ ok: false, message: d.detail || 'Pipeline trigger failed.' });
+                    }
+                } catch (e) {
+                    setResult({ ok: false, message: `Error triggering pipeline: ${e.message}` });
+                } finally {
+                    setTriggeringPipeline(false);
+                }
+            };
 
             const fetchQueue = (key) => {
                 if (!key) return;
@@ -820,7 +1039,7 @@
                                     <div className="mb-2 text-blue-600"><span className="text-gray-400">09 May 14:38</span> <span className="ml-2">Dashboard updated</span></div>
                                 </div>
                                 <div className="px-5 py-3 border-t border-gray-200 flex space-x-3 bg-white">
-                                    <button className="flex-1 bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-xs font-medium py-1.5 px-3 rounded shadow-sm transition-colors">Trigger pipeline run</button>
+                                    <button onClick={handleTriggerPipeline} disabled={triggeringPipeline} className="flex-1 bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-xs font-medium py-1.5 px-3 rounded shadow-sm transition-colors disabled:opacity-50">{triggeringPipeline ? "Triggering…" : "Trigger pipeline run"}</button>
                                     <button className="flex-1 bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-xs font-medium py-1.5 px-3 rounded shadow-sm transition-colors">View full log</button>
                                 </div>
                             </div>
