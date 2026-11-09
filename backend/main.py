@@ -40,6 +40,26 @@ async def lifespan(app: FastAPI):
     try:
         db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
         print(f"[DB] Connected to PostgreSQL.")
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'processing_status_enum') THEN
+                        CREATE TYPE processing_status_enum AS ENUM ('pending', 'processing', 'complete', 'failed');
+                    END IF;
+                END $$;
+
+                CREATE TABLE IF NOT EXISTS pipeline_jobs (
+                    job_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    start_date    DATE NOT NULL,
+                    end_date      DATE NOT NULL,
+                    status        processing_status_enum DEFAULT 'pending',
+                    created_at    TIMESTAMPTZ DEFAULT NOW(),
+                    completed_at  TIMESTAMPTZ,
+                    error_message TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_pipeline_jobs_status ON pipeline_jobs (status);
+            """)
     except Exception as e:
         print(f"[DB] WARNING: Could not connect to database: {e}")
         print("[DB] Running in MOCK mode — endpoints will return sample data.")
@@ -341,10 +361,19 @@ async def trigger_pipeline(request: PipelineRunRequest, background_tasks: Backgr
     # Persist to DB if connected
     if db_pool:
         async with db_pool.acquire() as conn:
+            import datetime
+            try:
+                s_date = datetime.date.fromisoformat(request.start_date)
+            except Exception:
+                s_date = datetime.date.today()
+            try:
+                e_date = datetime.date.fromisoformat(request.end_date)
+            except Exception:
+                e_date = datetime.date.today()
             await conn.execute(
                 """INSERT INTO pipeline_jobs (job_id, start_date, end_date, status)
                    VALUES ($1, $2, $3, 'pending')""",
-                uuid.UUID(job_id), request.start_date, request.end_date
+                uuid.UUID(job_id), s_date, e_date
             )
 
     # Launch background task
