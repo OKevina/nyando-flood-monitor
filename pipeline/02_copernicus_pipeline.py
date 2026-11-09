@@ -51,7 +51,8 @@ def get_available_dates(token, bbox, start_date, end_date, min_coverage=0.5):
     payload = {
         "collections": ["sentinel-1-grd"],
         "bbox": bbox,
-        "datetime": f"{start_date}T00:00:00Z/{end_date}T23:59:59Z"
+        "datetime": f"{start_date}T00:00:00Z/{end_date}T23:59:59Z",
+        "limit": 100
     }
     response = requests.post(CATALOG_API_URL, headers=headers, json=payload)
     response.raise_for_status()
