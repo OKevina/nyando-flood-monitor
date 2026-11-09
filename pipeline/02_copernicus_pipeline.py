@@ -261,8 +261,13 @@ def generate_mask(filtered_sar_path, shapefile_path, output_mask, date_str):
         print(f"[{date_str}] Warning: No valid SAR data. Generating blank mask.")
         refined_mask = np.zeros(shape, dtype=np.uint8)
     else:
-        thresh = threshold_otsu(valid_vv)
-        otsu_mask = (vv_band < thresh).astype(np.uint8)
+        # Otsu on the dB scale — linear sigma0 has a huge bright tail that
+        # pushes the threshold so high the mask becomes all-flood.
+        vv_db = 10.0 * np.log10(np.where(vv_band > 0, vv_band, np.nan))
+        valid_db = vv_db[~np.isnan(vv_db)]
+        thresh_db = threshold_otsu(valid_db)
+        otsu_mask = (vv_db < thresh_db).astype(np.uint8)
+        otsu_mask[np.isnan(vv_db)] = 0
         
         # Check if date falls in the waterlogged interlude (April 24-28)
         if "2024-04-24" <= date_str <= "2024-04-28":
