@@ -128,7 +128,12 @@ async def get_flood_map(
         params = []
 
         if date:
-            params.append(date)
+            from datetime import datetime
+            try:
+                date_val = datetime.fromisoformat(date.replace("Z", "+00:00")).date()
+            except ValueError:
+                date_val = datetime.strptime(date, "%Y-%m-%d").date()
+            params.append(date_val)
             conditions.append(f"s.acquisition_date::date = ${len(params)}")
 
         if bbox_coords:
