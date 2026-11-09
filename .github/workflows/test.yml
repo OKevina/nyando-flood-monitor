@@ -35,5 +35,12 @@ jobs:
           echo "DATABASE_URL=postgresql://none:none@localhost:5432/none" >> $GITHUB_ENV
           echo "ADMIN_API_KEY=test-secret-key" >> $GITHUB_ENV
 
+      - name: Debug workspace contents
+        run: |
+          echo "Working directory: $(pwd)"
+          echo "Contents of workspace:"
+          ls -la
+          echo "Contents of tests/:"
+          ls -la tests/ || echo "tests/ directory not found"
       - name: Run pytest
-        run: pytest tests/ -v --tb=short
+        run: python -m pytest tests/ -v --tb=short
