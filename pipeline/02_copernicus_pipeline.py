@@ -247,7 +247,7 @@ def apply_speckle_filter(input_tiff, output_tiff, date_str):
 # ==========================================
 # 4. DYNAMIC MASK GENERATION
 # ==========================================
-def generate_mask(filtered_sar_path, shapefile_path, output_mask, date_str):
+def generate_mask(filtered_sar_path, shapefile_path, output_mask, date_str, permanent_mask_path=None):
     print(f"[{date_str}] Generating binary flood mask...")
     with rasterio.open(filtered_sar_path) as src:
         meta = src.meta.copy()
@@ -292,6 +292,15 @@ def generate_mask(filtered_sar_path, shapefile_path, output_mask, date_str):
         else:
             print(f"[{date_str}]  -> Using Pure Otsu Mask")
             refined_mask = otsu_mask
+
+    # Subtract the permanent-water baseline so labels mean "new water" (flood),
+    # not "any low-backscatter surface" (lake, rivers, wetlands).
+    if permanent_mask_path and os.path.exists(permanent_mask_path):
+        with rasterio.open(permanent_mask_path) as src_perm:
+            perm = src_perm.read(1)
+        removed = int(((refined_mask == 1) & (perm == 1)).sum())
+        refined_mask[perm == 1] = 0
+        print(f"[{date_str}]  -> Removed {removed} permanent-water pixels from mask")
 
     meta.update(count=1, dtype=rasterio.uint8, nodata=0)
     with rasterio.open(output_mask, 'w', **meta) as dst:
@@ -384,8 +393,10 @@ def run_pipeline_for_date(token, date_str, project_dir, shapefile_path, output_t
     # Filter
     apply_speckle_filter(raw_sar_path, filtered_sar_path, date_str)
 
-    # Mask
-    generate_mask(filtered_sar_path, shapefile_path, mask_path, date_str)
+    # Mask (subtract permanent-water baseline when available)
+    perm_path = os.path.join(project_dir, "permanent_water_mask.tif")
+    generate_mask(filtered_sar_path, shapefile_path, mask_path, date_str,
+                  permanent_mask_path=perm_path if os.path.exists(perm_path) else None)
 
     # Tile & Filter Empty Patches
     total, retained, avg_pct = tile_and_filter(filtered_sar_path, mask_path, output_tiles_dir, date_str)
