@@ -247,7 +247,12 @@ def apply_speckle_filter(input_tiff, output_tiff, date_str):
 # ==========================================
 # 4. DYNAMIC MASK GENERATION
 # ==========================================
-def generate_mask(filtered_sar_path, shapefile_path, output_mask, date_str, permanent_mask_path=None):
+TEMPORAL_DELTA_DB = 3.0   # anomaly must be this many dB below the orbit median
+TEMPORAL_CEIL_DB = -12.0  # ...and below this absolute ceiling (water-like)
+
+
+def generate_mask(filtered_sar_path, shapefile_path, output_mask, date_str,
+                  permanent_mask_path=None, temporal_median_path=None):
     print(f"[{date_str}] Generating binary flood mask...")
     with rasterio.open(filtered_sar_path) as src:
         meta = src.meta.copy()
@@ -264,10 +269,22 @@ def generate_mask(filtered_sar_path, shapefile_path, output_mask, date_str, perm
         # Otsu on the dB scale — linear sigma0 has a huge bright tail that
         # pushes the threshold so high the mask becomes all-flood.
         vv_db = 10.0 * np.log10(np.where(vv_band > 0, vv_band, np.nan))
-        valid_db = vv_db[~np.isnan(vv_db)]
-        thresh_db = threshold_otsu(valid_db)
-        otsu_mask = (vv_db < thresh_db).astype(np.uint8)
-        otsu_mask[np.isnan(vv_db)] = 0
+
+        if temporal_median_path and os.path.exists(temporal_median_path):
+            # Temporal anomaly: water = anomalously low VV vs this orbit's
+            # per-pixel history. Immune to the orbit-geometry threshold
+            # instability that made per-scene Otsu bimodal.
+            with rasterio.open(temporal_median_path) as src_med:
+                med_db = src_med.read(1)
+            otsu_mask = ((vv_db < med_db - TEMPORAL_DELTA_DB) &
+                         (vv_db < TEMPORAL_CEIL_DB)).astype(np.uint8)
+            otsu_mask[np.isnan(vv_db)] = 0
+            print(f"[{date_str}]  -> Using Temporal Anomaly Mask")
+        else:
+            valid_db = vv_db[~np.isnan(vv_db)]
+            thresh_db = threshold_otsu(valid_db)
+            otsu_mask = (vv_db < thresh_db).astype(np.uint8)
+            otsu_mask[np.isnan(vv_db)] = 0
         
         # Check if date falls in the waterlogged interlude (April 24-28)
         if "2024-04-24" <= date_str <= "2024-04-28":
@@ -393,10 +410,22 @@ def run_pipeline_for_date(token, date_str, project_dir, shapefile_path, output_t
     # Filter
     apply_speckle_filter(raw_sar_path, filtered_sar_path, date_str)
 
-    # Mask (subtract permanent-water baseline when available)
+    # Mask (subtract permanent-water baseline; prefer per-orbit temporal
+    # anomaly labels when the median baselines exist)
     perm_path = os.path.join(project_dir, "permanent_water_mask.tif")
+    temporal_path = None
+    orbit_map_path = os.path.join(project_dir, "orbit_map.json")
+    if os.path.exists(orbit_map_path):
+        import json
+        with open(orbit_map_path) as fh:
+            orbit = json.load(fh).get(date_str)
+        if orbit:
+            candidate = os.path.join(project_dir, f"temporal_median_db_{orbit}.tif")
+            if os.path.exists(candidate):
+                temporal_path = candidate
     generate_mask(filtered_sar_path, shapefile_path, mask_path, date_str,
-                  permanent_mask_path=perm_path if os.path.exists(perm_path) else None)
+                  permanent_mask_path=perm_path if os.path.exists(perm_path) else None,
+                  temporal_median_path=temporal_path)
 
     # Tile & Filter Empty Patches
     total, retained, avg_pct = tile_and_filter(filtered_sar_path, mask_path, output_tiles_dir, date_str)
