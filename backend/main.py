@@ -21,8 +21,10 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 async def verify_api_key(api_key: str = Security(_api_key_header)):
+    # Auth is enforced only when ADMIN_API_KEY is configured; an unset key
+    # disables it for local development. Set the env var to re-enable.
     if not ADMIN_API_KEY:
-        raise HTTPException(status_code=500, detail="ADMIN_API_KEY not configured on server.")
+        return None
     if api_key != ADMIN_API_KEY:
         raise HTTPException(status_code=403, detail="Invalid or missing API key.")
     return api_key
