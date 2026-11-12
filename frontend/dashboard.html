@@ -129,8 +129,7 @@
             // Admin API Key helper (reads configured key or uses default dev secret)
             const getApiKey = () => {
                 return localStorage.getItem('nyando_admin_api_key') || 
-                       localStorage.getItem('admin_api_key') || 
-                       'a62669ea6ffc9b41606214ba025f7628ddc861a57fd3c52fa35fe3135e53611b';
+                       localStorage.getItem('admin_api_key') || '';
             };
 
             // Fetch and render Flood Map GeoJSON layer
@@ -895,7 +894,7 @@
             const [triggeringPipeline, setTriggeringPipeline] = React.useState(false);
 
             const handleTriggerPipeline = async () => {
-                const key = apiKey || localStorage.getItem('nyando_admin_api_key') || localStorage.getItem('admin_api_key') || 'a62669ea6ffc9b41606214ba025f7628ddc861a57fd3c52fa35fe3135e53611b';
+                const key = apiKey || localStorage.getItem('nyando_admin_api_key') || localStorage.getItem('admin_api_key') || '';
                 setTriggeringPipeline(true);
                 try {
                     const today = new Date().toISOString().split('T')[0];
