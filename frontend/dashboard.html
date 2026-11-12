@@ -93,7 +93,32 @@
             const [showBaseMap, setShowBaseMap] = React.useState(true);
 
             // Summary stats
-            const [summary, setSummary] = React.useState({ area_sqkm: 78.4, wards: 5, date: 'May 2024' });
+            const [summary, setSummary] = React.useState({ area_sqkm: '—', wards: '—', date: '—' });
+            const [affectedWardsCount, setAffectedWardsCount] = React.useState(null);
+
+            // Satellite pass finder
+            const [passMonth, setPassMonth] = React.useState('');
+            const [satPasses, setSatPasses] = React.useState(null);
+            const [satLoading, setSatLoading] = React.useState(false);
+            const [satError, setSatError] = React.useState('');
+
+            const findSatellitePasses = () => {
+                if (!passMonth) return;
+                const [y, m] = passMonth.split('-').map(Number);
+                const start = `${passMonth}-01`;
+                const end = `${y}-${String(m).padStart(2, '0')}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
+                setSatLoading(true);
+                setSatError('');
+                setSatPasses(null);
+                fetch(`http://127.0.0.1:8000/api/v1/satellite_passes?start_date=${start}&end_date=${end}`)
+                    .then(r => r.json().then(d => ({ ok: r.ok, d })))
+                    .then(({ ok, d }) => {
+                        if (!ok) throw new Error(d.detail || 'CDSE query failed');
+                        setSatPasses(d.dates || []);
+                    })
+                    .catch(e => setSatError(e.message))
+                    .finally(() => setSatLoading(false));
+            };
 
             const mapContainerRef = React.useRef(null);
             const mapRef = React.useRef(null);
@@ -145,9 +170,9 @@
                             
                             const firstProp = data.features[0].properties || {};
                             setSummary({
-                                area_sqkm: firstProp.area_sqkm || 78.4,
-                                wards: 5,
-                                date: firstProp.acquisition_date ? firstProp.acquisition_date.split('T')[0] : (dateToFetch || 'May 2024')
+                                area_sqkm: firstProp.area_sqkm !== undefined ? firstProp.area_sqkm : '—',
+                                wards: affectedWardsCount !== null ? affectedWardsCount : '—',
+                                date: firstProp.acquisition_date ? firstProp.acquisition_date.split('T')[0] : (dateToFetch || '—')
                             });
                         } else {
                             floodLayerRef.current = null;
@@ -260,11 +285,12 @@
                 }
             };
 
-            // Handle date change from user selection or custom input
+            // Handle date change: just view existing data — pipeline only runs
+            // when the user presses "Generate Flood Map".
             const handleDateChange = (newDate) => {
                 if (!newDate) return;
                 setSelectedDate(newDate);
-                triggerPipeline(newDate);
+                fetchFloodMap(newDate);
             };
 
             // 1. Initialize Map
@@ -332,6 +358,15 @@
                         }
                     })
                     .catch(err => console.error('Ward boundaries fetch error:', err));
+
+                // Fetch affected-wards count for the summary card
+                fetch('http://127.0.0.1:8000/api/v1/analytics/wards')
+                    .then(r => r.json())
+                    .then(d => {
+                        const n = (d.wards || []).filter(w => Number(w.flooded_area_km2) > 0).length;
+                        setAffectedWardsCount(n);
+                    })
+                    .catch(() => {});
 
                 setTimeout(() => { map.invalidateSize(); }, 300);
 
@@ -442,6 +477,55 @@
                                         max={new Date().toISOString().split('T')[0]}
                                     />
                                     <span className="text-[11px] text-gray-400 font-medium">Custom</span>
+                                </div>
+
+                                {/* Satellite pass finder */}
+                                <div className="mt-3 pt-3 border-t border-gray-100">
+                                    <label className="block text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-1.5">Satellite Overpasses</label>
+                                    <div className="flex items-center space-x-2">
+                                        <input
+                                            type="month"
+                                            value={passMonth}
+                                            onChange={e => setPassMonth(e.target.value)}
+                                            className="flex-1 border border-gray-300 rounded-md p-1.5 text-xs bg-white text-gray-700 focus:ring-2 focus:ring-blue-500 shadow-sm"
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={findSatellitePasses}
+                                            disabled={satLoading || !passMonth}
+                                            className="px-2.5 py-1.5 bg-gray-800 hover:bg-gray-900 disabled:bg-gray-300 text-white text-[11px] font-semibold rounded-md transition-colors whitespace-nowrap">
+                                            {satLoading ? '…' : 'Find passes'}
+                                        </button>
+                                    </div>
+                                    {satError && <p className="text-[11px] text-red-500 mt-1.5">{satError}</p>}
+                                    {satPasses && (
+                                        <div className="mt-2">
+                                            {satPasses.length === 0 ? (
+                                                <p className="text-[11px] text-gray-400">No usable passes this month</p>
+                                            ) : (
+                                                <div className="flex flex-wrap gap-1">
+                                                    {satPasses.map(d => (
+                                                        <button
+                                                            key={d}
+                                                            type="button"
+                                                            onClick={() => handleDateChange(d)}
+                                                            className={`px-2 py-0.5 text-[11px] rounded-full border transition-colors ${
+                                                                selectedDate === d
+                                                                    ? 'bg-blue-600 text-white border-blue-600'
+                                                                    : 'bg-white text-gray-700 border-gray-300 hover:border-blue-400'
+                                                            }`}>
+                                                            {d.slice(5)}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            )}
+                                            {satPasses.length > 0 && (
+                                                <p className="text-[10px] text-gray-400 mt-1.5">
+                                                    {satPasses.length} pass date(s) — select one, then press Generate Flood Map.
+                                                </p>
+                                            )}
+                                        </div>
+                                    )}
                                 </div>
 
                                 {/* Generate Flood Map Button */}
@@ -669,7 +753,7 @@
                 <div className="max-w-6xl mx-auto space-y-6">
                     <div>
                         <h1 className="text-2xl font-bold text-gray-900">Flood Impact Analytics</h1>
-                        <p className="text-sm text-gray-500">Nyando River Basin · May 2024</p>
+                        <p className="text-sm text-gray-500">Nyando River Basin{analytics?.peak_date ? ` · peak ${analytics.peak_date}` : ''}</p>
                     </div>
 
                     {/* KPI Cards */}
