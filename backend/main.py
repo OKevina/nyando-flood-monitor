@@ -119,6 +119,43 @@ async def get_scenes():
         return [dict(r) for r in rows]
 
 
+_sat_pass_cache: dict = {}
+
+@app.get("/api/v1/satellite_passes")
+async def satellite_passes(
+    start_date: str = Query(..., description="YYYY-MM-DD"),
+    end_date: str = Query(..., description="YYYY-MM-DD"),
+):
+    """Query CDSE for Sentinel-1 pass dates covering the Nyando AOI.
+    Results are cached for 15 minutes per date range."""
+    import time
+    import importlib
+    import sys
+
+    key = (start_date, end_date)
+    hit = _sat_pass_cache.get(key)
+    if hit and time.time() - hit[0] < 900:
+        return {"dates": hit[1], "cached": True}
+
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    mod02 = importlib.import_module("pipeline.02_copernicus_pipeline")
+
+    def _fetch():
+        token = mod02.get_cdse_token()
+        return mod02.get_available_dates(token, mod02.BBOX, start_date, end_date)
+
+    try:
+        dates = await asyncio.to_thread(_fetch)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"CDSE query failed: {e}")
+
+    dates = [d for d in dates if d != "2024-04-24"]
+    _sat_pass_cache[key] = (time.time(), dates)
+    return {"dates": dates, "cached": False}
+
+
 @app.get("/api/v1/flood_map")
 async def get_flood_map(
     date: str = Query(None, description="ISO date string e.g. 2024-05-06"),
@@ -180,7 +217,8 @@ async def get_flood_map(
             SELECT
                 s.acquisition_date,
                 m.model_version,
-                ST_AsGeoJSON(ST_Union(poly.geom))::json AS geojson
+                ST_AsGeoJSON(ST_Union(poly.geom))::json AS geojson,
+                ROUND(CAST(SUM(ST_Area(poly.geom::geography)) / 1e6 AS numeric), 2) AS area_km2
             FROM flood_masks m
             JOIN scenes s ON m.scene_id = s.scene_id
             CROSS JOIN LATERAL ST_DumpAsPolygons(m.flood_raster) AS poly
@@ -197,6 +235,7 @@ async def get_flood_map(
                     "properties": {
                         "acquisition_date": row["acquisition_date"].isoformat(),
                         "model_version": row["model_version"],
+                        "area_sqkm": float(row["area_km2"]),
                     },
                     "geometry": json.loads(row["geojson"]) if isinstance(row["geojson"], str) else row["geojson"]
                 })
@@ -231,9 +270,24 @@ async def get_analytics():
             for r in rows
         ]
         peak = max(time_series, key=lambda x: x["area_km2"])
+
+        # Count Kisumu wards that intersect any flood polygon
+        ward_row = await conn.fetchrow("""
+            WITH flood AS (
+                SELECT ST_CollectionExtract(ST_Union(d.geom), 3) AS geom
+                FROM flood_masks m,
+                     LATERAL ST_DumpAsPolygons(m.flood_raster) d
+                WHERE d.val >= 1
+            )
+            SELECT COUNT(DISTINCT w.ward) AS n
+            FROM ward_boundaries w, flood f
+            WHERE w.county ILIKE '%Kisumu%' AND ST_Intersects(w.geom, f.geom)
+        """)
+        affected_wards = int(ward_row["n"]) if ward_row else 0
+
         return {
             "total_area_km2": peak["area_km2"],
-            "affected_wards": 5,  # Requires spatial join with ward boundaries — hardcoded for now
+            "affected_wards": affected_wards,
             "peak_date": peak["date"],
             "model_version": rows[0]["model_version"],
             "time_series": time_series,
@@ -249,6 +303,12 @@ async def get_ward_analytics():
         ]}
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("""
+            WITH flood AS (
+                SELECT ST_CollectionExtract(ST_Union(d.geom), 3) AS geom
+                FROM flood_masks m,
+                     LATERAL ST_DumpAsPolygons(m.flood_raster) d
+                WHERE d.val >= 1
+            )
             SELECT
                 w.ward AS ward_name,
                 w.county,
@@ -256,17 +316,15 @@ async def get_ward_analytics():
                     CAST(
                         SUM(
                             ST_Area(
-                                ST_Intersection(w.geom, poly.geom)::geography
+                                ST_Intersection(w.geom, f.geom)::geography
                             ) / 1e6
                         ) AS numeric
                     ), 4
                 ) AS flooded_area_km2
             FROM ward_boundaries w
-            CROSS JOIN LATERAL (
-                SELECT (ST_DumpAsPolygons(m.flood_raster)).geom
-                FROM flood_masks m
-            ) AS poly
-            WHERE ST_Intersects(w.geom, poly.geom)
+            CROSS JOIN flood f
+            WHERE w.county ILIKE '%Kisumu%'
+              AND ST_Intersects(w.geom, f.geom)
             GROUP BY w.ward, w.county
             ORDER BY flooded_area_km2 DESC;
         """)
@@ -470,9 +528,14 @@ async def run_pipeline_background(job_id: str, start_date: str, end_date: str):
             if not os.path.exists(raw_sar_path):
                 download_rtc_sar_image(token, raw_sar_path, date_str)
 
-            # Skip scenes that are (nearly) all nodata
+            # Skip scenes that are (nearly) all nodata — delete the bad file
+            # so the next run re-downloads instead of caching the failure
             if not scene_has_valid_data(raw_sar_path):
-                print(f"[{date_str}] Skipping — scene has no valid SAR data.")
+                print(f"[{date_str}] Skipping — scene has no valid SAR data (deleting bad file).")
+                try:
+                    os.remove(raw_sar_path)
+                except OSError:
+                    pass
                 _pipeline_jobs[job_id]["message"] = f"{date_str}: no valid SAR data, skipped."
                 continue
 
@@ -510,7 +573,7 @@ async def run_pipeline_background(job_id: str, start_date: str, end_date: str):
 
             # Ingest U-Net flood mask into PostGIS
             if db_pool and DATABASE_URL and scene_uuid:
-                await ingest_to_postgis(pred_path, str(scene_uuid), DATABASE_URL, model_version="U-Net v1.0", threshold=0.5)
+                await ingest_to_postgis(pred_path, str(scene_uuid), DATABASE_URL, model_version="U-Net v2.0-dB", threshold=0.5)
 
         _pipeline_jobs[job_id]["status"] = "complete"
         _pipeline_jobs[job_id]["message"] = f"Pipeline complete for {len(available_dates)} scenes."

@@ -36,12 +36,13 @@ class NyandoFloodDataset(Dataset):
         with rasterio.open(sar_path) as src:
             # Sentinel-1 is VV, VH (2 bands). Read and convert to Float32
             sar = src.read().astype(np.float32)
-            sar = np.nan_to_num(sar)
-            # Per-channel Z-score normalization — must match 01_base_training.py
-            for c in range(sar.shape[0]):
-                mean, std = np.mean(sar[c]), np.std(sar[c])
-                if std > 0:
-                    sar[c] = (sar[c] - mean) / std
+
+        # Fixed dB scaling — must match 05_inference.normalize_patch and the
+        # Colab notebook dataset class. Preserves absolute backscatter.
+        sar = 10.0 * np.log10(np.where(sar > 0, sar, np.nan))
+        sar = np.nan_to_num(sar, nan=-15.0)
+        sar = np.clip(sar, -30.0, 0.0)
+        sar = (sar + 30.0) / 30.0   # -> [0, 1]
             
         with rasterio.open(mask_path) as src:
             # Mask is 1 band (0=dry, 1=flood)

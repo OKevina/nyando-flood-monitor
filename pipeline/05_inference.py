@@ -10,6 +10,18 @@ Usage:
 """
 import argparse
 import os
+
+# Point PROJ/GDAL at rasterio's bundled data files before any rasterio use.
+try:
+    import importlib.util as _ilu
+    _spec = _ilu.find_spec("rasterio")
+    if _spec and _spec.submodule_search_locations:
+        _rio = _spec.submodule_search_locations[0]
+        os.environ["PROJ_LIB"] = os.path.join(_rio, "proj_data")
+        os.environ["GDAL_DATA"] = os.path.join(_rio, "gdal_data")
+except Exception:
+    pass
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -55,15 +67,19 @@ class UNet(nn.Module):
 PATCH = 256
 
 def normalize_patch(patch: np.ndarray) -> np.ndarray:
-    """Per-channel Z-score — must match training normalization."""
-    out = patch.astype(np.float32)
-    for c in range(out.shape[0]):
-        mean, std = out[c].mean(), out[c].std()
-        if std > 0:
-            out[c] = (out[c] - mean) / std
-    return out
+    """Fixed dB scaling — must match NyandoFloodDataset in the Colab notebook.
 
-def run_inference(scene_path: str, model_path: str, out_path: str, threshold: float = 0.5):
+    Converts linear sigma0 to dB, clips to [-30, 0], scales to [0, 1].
+    Preserves absolute backscatter (open water = low dB), unlike the old
+    per-patch z-score which erased it.
+    """
+    out = 10.0 * np.log10(np.where(patch > 0, patch, np.nan))
+    out = np.nan_to_num(out, nan=-15.0)
+    out = np.clip(out, -30.0, 0.0)
+    return ((out + 30.0) / 30.0).astype(np.float32)
+
+def run_inference(scene_path: str, model_path: str, out_path: str,
+                  threshold: float = 0.5, min_area: int = 200):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
@@ -105,6 +121,17 @@ def run_inference(scene_path: str, model_path: str, out_path: str, threshold: fl
     # Crop padding back, apply threshold
     mask = (prediction[:H, :W] >= threshold).astype(np.uint8)
 
+    # Remove speckle: drop connected components smaller than min_area pixels
+    # (~22 m/px -> 200 px ≈ 0.1 km²)
+    if min_area > 0:
+        from scipy import ndimage
+        lab, _ = ndimage.label(mask)
+        sizes = np.bincount(lab.ravel())
+        sizes[0] = 0
+        mask[np.isin(lab, np.nonzero(sizes < min_area)[0])] = 0
+        print(f"Removed components < {min_area} px; "
+              f"{int(mask.sum())} flood px remain")
+
     # Write output GeoTIFF
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     meta.update(count=1, dtype='uint8', nodata=255)
@@ -113,7 +140,7 @@ def run_inference(scene_path: str, model_path: str, out_path: str, threshold: fl
     print(f"Flood mask saved to {out_path}")
     return out_path
 
-async def ingest_to_postgis(tif_path: str, scene_id: str, db_url: str, model_version: str = "U-Net v1.0", threshold: float = 0.5):
+async def ingest_to_postgis(tif_path: str, scene_id: str, db_url: str, model_version: str = "U-Net v2.0-dB", threshold: float = 0.5):
     """Load flood mask raster into PostGIS flood_masks table using asyncpg (no raster2pgsql dependency)."""
     import asyncpg
     print("Ingesting raster into PostGIS via asyncpg...")
@@ -149,13 +176,19 @@ if __name__ == "__main__":
     parser.add_argument("--out",      default="data/predictions/flood_mask.tif")
     parser.add_argument("--db",       default=os.getenv("DATABASE_URL", ""), help="PostgreSQL connection string")
     parser.add_argument("--threshold",default=0.5, type=float)
+    parser.add_argument("--min-area", default=200, type=int,
+                        help="Min flood component size in pixels (0 disables)")
+    parser.add_argument("--model-version", default="U-Net v2.0-dB")
     parser.add_argument("--no-ingest",action="store_true", help="Skip PostGIS ingestion")
     args = parser.parse_args()
 
-    tif = run_inference(args.scene, args.model, args.out, args.threshold)
+    tif = run_inference(args.scene, args.model, args.out, args.threshold,
+                        min_area=args.min_area)
 
     if not args.no_ingest and args.db:
-        asyncio.run(ingest_to_postgis(tif, args.scene_id, args.db, threshold=args.threshold))
+        asyncio.run(ingest_to_postgis(tif, args.scene_id, args.db,
+                                      model_version=args.model_version,
+                                      threshold=args.threshold))
     elif args.no_ingest:
         print("Skipping PostGIS ingestion (--no-ingest flag set).")
     else:

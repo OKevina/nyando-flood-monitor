@@ -1,4 +1,18 @@
 import os
+
+# Point PROJ/GDAL at rasterio's bundled data files before any rasterio use.
+# A machine-wide GDAL_DATA/PROJ_LIB may reference an incompatible
+# PostgreSQL/PostGIS install, which breaks CRS lookups with a proj.db error.
+try:
+    import importlib.util as _ilu
+    _spec = _ilu.find_spec("rasterio")
+    if _spec and _spec.submodule_search_locations:
+        _rio = _spec.submodule_search_locations[0]
+        os.environ["PROJ_LIB"] = os.path.join(_rio, "proj_data")
+        os.environ["GDAL_DATA"] = os.path.join(_rio, "gdal_data")
+except Exception:
+    pass
+
 import requests
 import rasterio
 from rasterio.transform import from_bounds
@@ -37,9 +51,18 @@ def _check_credentials():
 def get_cdse_token():
     _check_credentials()
     payload = {"grant_type": "client_credentials", "client_id": CLIENT_ID, "client_secret": CLIENT_SECRET}
-    response = requests.post(TOKEN_URL, data=payload)
-    response.raise_for_status()
-    return response.json()["access_token"]
+    import time
+    last_err = None
+    for attempt in range(5):
+        try:
+            response = requests.post(TOKEN_URL, data=payload, timeout=(30, 60))
+            response.raise_for_status()
+            return response.json()["access_token"]
+        except Exception as e:
+            last_err = e
+            print(f"[auth] token attempt {attempt + 1}/5 failed: {e}")
+            time.sleep(10 + attempt * 10)
+    raise last_err
 
 def get_available_dates(token, bbox, start_date, end_date, min_coverage=0.5):
     """Return pass dates whose scene footprint covers at least `min_coverage`
@@ -51,7 +74,8 @@ def get_available_dates(token, bbox, start_date, end_date, min_coverage=0.5):
     payload = {
         "collections": ["sentinel-1-grd"],
         "bbox": bbox,
-        "datetime": f"{start_date}T00:00:00Z/{end_date}T23:59:59Z"
+        "datetime": f"{start_date}T00:00:00Z/{end_date}T23:59:59Z",
+        "limit": 100
     }
     response = requests.post(CATALOG_API_URL, headers=headers, json=payload)
     response.raise_for_status()
@@ -223,7 +247,12 @@ def apply_speckle_filter(input_tiff, output_tiff, date_str):
 # ==========================================
 # 4. DYNAMIC MASK GENERATION
 # ==========================================
-def generate_mask(filtered_sar_path, shapefile_path, output_mask, date_str):
+TEMPORAL_DELTA_DB = 3.0   # anomaly must be this many dB below the orbit median
+TEMPORAL_CEIL_DB = -12.0  # ...and below this absolute ceiling (water-like)
+
+
+def generate_mask(filtered_sar_path, shapefile_path, output_mask, date_str,
+                  permanent_mask_path=None, temporal_median_path=None):
     print(f"[{date_str}] Generating binary flood mask...")
     with rasterio.open(filtered_sar_path) as src:
         meta = src.meta.copy()
@@ -237,8 +266,25 @@ def generate_mask(filtered_sar_path, shapefile_path, output_mask, date_str):
         print(f"[{date_str}] Warning: No valid SAR data. Generating blank mask.")
         refined_mask = np.zeros(shape, dtype=np.uint8)
     else:
-        thresh = threshold_otsu(valid_vv)
-        otsu_mask = (vv_band < thresh).astype(np.uint8)
+        # Otsu on the dB scale — linear sigma0 has a huge bright tail that
+        # pushes the threshold so high the mask becomes all-flood.
+        vv_db = 10.0 * np.log10(np.where(vv_band > 0, vv_band, np.nan))
+
+        if temporal_median_path and os.path.exists(temporal_median_path):
+            # Temporal anomaly: water = anomalously low VV vs this orbit's
+            # per-pixel history. Immune to the orbit-geometry threshold
+            # instability that made per-scene Otsu bimodal.
+            with rasterio.open(temporal_median_path) as src_med:
+                med_db = src_med.read(1)
+            otsu_mask = ((vv_db < med_db - TEMPORAL_DELTA_DB) &
+                         (vv_db < TEMPORAL_CEIL_DB)).astype(np.uint8)
+            otsu_mask[np.isnan(vv_db)] = 0
+            print(f"[{date_str}]  -> Using Temporal Anomaly Mask")
+        else:
+            valid_db = vv_db[~np.isnan(vv_db)]
+            thresh_db = threshold_otsu(valid_db)
+            otsu_mask = (vv_db < thresh_db).astype(np.uint8)
+            otsu_mask[np.isnan(vv_db)] = 0
         
         # Check if date falls in the waterlogged interlude (April 24-28)
         if "2024-04-24" <= date_str <= "2024-04-28":
@@ -263,6 +309,15 @@ def generate_mask(filtered_sar_path, shapefile_path, output_mask, date_str):
         else:
             print(f"[{date_str}]  -> Using Pure Otsu Mask")
             refined_mask = otsu_mask
+
+    # Subtract the permanent-water baseline so labels mean "new water" (flood),
+    # not "any low-backscatter surface" (lake, rivers, wetlands).
+    if permanent_mask_path and os.path.exists(permanent_mask_path):
+        with rasterio.open(permanent_mask_path) as src_perm:
+            perm = src_perm.read(1)
+        removed = int(((refined_mask == 1) & (perm == 1)).sum())
+        refined_mask[perm == 1] = 0
+        print(f"[{date_str}]  -> Removed {removed} permanent-water pixels from mask")
 
     meta.update(count=1, dtype=rasterio.uint8, nodata=0)
     with rasterio.open(output_mask, 'w', **meta) as dst:
@@ -341,16 +396,36 @@ def run_pipeline_for_date(token, date_str, project_dir, shapefile_path, output_t
     else:
         print("[" + date_str + "] Raw SAR already exists, skipping download.")
 
-    # Skip scenes that are (nearly) all nodata — swath misses or empty RTC products
+    # Skip scenes that are (nearly) all nodata — swath misses or empty RTC
+    # products. Delete the file so the next run re-downloads it: a truncated
+    # or transient-empty download must not be cached forever.
     if not scene_has_valid_data(raw_sar_path):
-        print("[" + date_str + "] Skipping — scene has no valid SAR data.")
+        print("[" + date_str + "] Skipping — scene has no valid SAR data (deleting bad file).")
+        try:
+            os.remove(raw_sar_path)
+        except OSError:
+            pass
         return {"date": date_str, "total": 0, "retained": 0, "pct": 0.0}
 
     # Filter
     apply_speckle_filter(raw_sar_path, filtered_sar_path, date_str)
 
-    # Mask
-    generate_mask(filtered_sar_path, shapefile_path, mask_path, date_str)
+    # Mask (subtract permanent-water baseline; prefer per-orbit temporal
+    # anomaly labels when the median baselines exist)
+    perm_path = os.path.join(project_dir, "permanent_water_mask.tif")
+    temporal_path = None
+    orbit_map_path = os.path.join(project_dir, "orbit_map.json")
+    if os.path.exists(orbit_map_path):
+        import json
+        with open(orbit_map_path) as fh:
+            orbit = json.load(fh).get(date_str)
+        if orbit:
+            candidate = os.path.join(project_dir, f"temporal_median_db_{orbit}.tif")
+            if os.path.exists(candidate):
+                temporal_path = candidate
+    generate_mask(filtered_sar_path, shapefile_path, mask_path, date_str,
+                  permanent_mask_path=perm_path if os.path.exists(perm_path) else None,
+                  temporal_median_path=temporal_path)
 
     # Tile & Filter Empty Patches
     total, retained, avg_pct = tile_and_filter(filtered_sar_path, mask_path, output_tiles_dir, date_str)
