@@ -676,16 +676,17 @@
             const [exportingGeoJSON, setExportingGeoJSON] = React.useState(false);
 
             React.useEffect(() => {
-                fetch('http://127.0.0.1:8000/api/v1/analytics')
+                const dateParam = selectedDate ? `?date=${encodeURIComponent(selectedDate)}` : '';
+                fetch(`http://127.0.0.1:8000/api/v1/analytics${dateParam}`)
                     .then(res => res.json())
                     .then(data => setAnalytics(data))
                     .catch(err => console.error('Analytics fetch failed:', err));
 
-                fetch('http://127.0.0.1:8000/api/v1/analytics/wards')
+                fetch(`http://127.0.0.1:8000/api/v1/analytics/wards${dateParam}`)
                     .then(res => res.json())
                     .then(data => setWards(data.wards || []))
                     .catch(err => console.error('Ward analytics fetch failed:', err));
-            }, []);
+            }, [selectedDate]);
 
             const sortedWards = React.useMemo(() => {
                 return [...wards].sort((a, b) => {
@@ -750,9 +751,17 @@
             return (
             <div className="h-full overflow-y-auto bg-gray-50 p-8">
                 <div className="max-w-6xl mx-auto space-y-6">
-                    <div>
-                        <h1 className="text-2xl font-bold text-gray-900">Flood Impact Analytics</h1>
-                        <p className="text-sm text-gray-500">Nyando River Basin{analytics?.peak_date ? ` · peak ${analytics.peak_date}` : ''}</p>
+                    <div className="flex items-start justify-between">
+                        <div>
+                            <h1 className="text-2xl font-bold text-gray-900">Flood Impact Analytics</h1>
+                            <p className="text-sm text-gray-500">Nyando River Basin{analytics?.peak_date ? ` · peak ${analytics.peak_date}` : ''}</p>
+                        </div>
+                        {selectedDate && (
+                            <div className="flex items-center space-x-2 bg-blue-50 border border-blue-200 text-blue-800 text-xs font-medium px-3 py-1.5 rounded-full">
+                                <span>Filtered to {selectedDate}</span>
+                                <button onClick={() => setSelectedDate('')} className="text-blue-600 hover:text-blue-900 font-bold" title="Show all events">✕</button>
+                            </div>
+                        )}
                     </div>
 
                     {/* KPI Cards */}
@@ -760,7 +769,7 @@
                         {[
                             { label: "Total inundated area", value: analytics ? `${analytics.total_area_km2} km²` : "—" },
                             { label: "Affected wards",       value: analytics ? `${analytics.affected_wards}` : "—" },
-                            { label: "Peak date",            value: analytics ? analytics.peak_date : "—" },
+                            { label: selectedDate ? "Selected date" : "Peak date", value: analytics ? analytics.peak_date : "—" },
                             { label: "Model version",        value: analytics ? analytics.model_version : "—" }
                         ].map(kpi => (
                             <div key={kpi.label} className="bg-white p-4 rounded-lg shadow-sm border border-gray-200">
