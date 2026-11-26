@@ -243,7 +243,7 @@ async def get_flood_map(
 
 
 @app.get("/api/v1/analytics")
-async def get_analytics():
+async def get_analytics(date: str = Query(None, description="Optional YYYY-MM-DD to scope KPIs to one scene")):
     """Returns flood impact KPI data from the analytics view."""
     if not db_pool:
         return {
@@ -271,19 +271,42 @@ async def get_analytics():
         ]
         peak = max(time_series, key=lambda x: x["area_km2"])
 
-        # Count Kisumu wards that intersect any flood polygon
-        ward_row = await conn.fetchrow("""
+        # Count Kisumu wards that intersect flood polygons (optionally one scene)
+        import datetime as _dt
+        try:
+            date_obj = _dt.date.fromisoformat(date) if date else None
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format; use YYYY-MM-DD")
+        date_filter = "AND s.acquisition_date::date = $1" if date_obj else ""
+        ward_row = await conn.fetchrow(f"""
             WITH flood AS (
                 SELECT ST_CollectionExtract(ST_Union(d.geom), 3) AS geom
-                FROM flood_masks m,
-                     LATERAL ST_DumpAsPolygons(m.flood_raster) d
-                WHERE d.val >= 1
+                FROM flood_masks m
+                JOIN scenes s ON m.scene_id = s.scene_id
+                JOIN LATERAL ST_DumpAsPolygons(m.flood_raster) d ON true
+                WHERE d.val >= 1 {date_filter}
             )
             SELECT COUNT(DISTINCT w.ward) AS n
             FROM ward_boundaries w, flood f
             WHERE w.county ILIKE '%Kisumu%' AND ST_Intersects(w.geom, f.geom)
-        """)
+        """, *([date_obj] if date_obj else []))
         affected_wards = int(ward_row["n"]) if ward_row else 0
+
+        if date:
+            match = next((t for t in time_series if t["date"] == date), None)
+            ver = next(
+                (r["model_version"] for r in rows
+                 if r["acquisition_date"].strftime("%Y-%m-%d") == date),
+                "N/A",
+            )
+            return {
+                "total_area_km2": match["area_km2"] if match else 0.0,
+                "affected_wards": affected_wards,
+                "peak_date": date if match else "N/A",
+                "model_version": ver,
+                "time_series": time_series,
+                "selected_date": date,
+            }
 
         return {
             "total_area_km2": peak["area_km2"],
@@ -294,7 +317,7 @@ async def get_analytics():
         }
 
 @app.get("/api/v1/analytics/wards")
-async def get_ward_analytics():
+async def get_ward_analytics(date: str = Query(None, description="Optional YYYY-MM-DD to scope to one scene")):
     """Return per-ward flooded area (km²) using ST_Intersection."""
     if db_pool is None:
         return {"mock": True, "wards": [
@@ -302,12 +325,19 @@ async def get_ward_analytics():
             {"ward_name": "Nyando", "county": "Kisumu", "flooded_area_km2": 2.8},
         ]}
     async with db_pool.acquire() as conn:
-        rows = await conn.fetch("""
+        import datetime as _dt
+        try:
+            date_obj = _dt.date.fromisoformat(date) if date else None
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format; use YYYY-MM-DD")
+        date_filter = "AND s.acquisition_date::date = $1" if date_obj else ""
+        rows = await conn.fetch(f"""
             WITH flood AS (
                 SELECT ST_CollectionExtract(ST_Union(d.geom), 3) AS geom
-                FROM flood_masks m,
-                     LATERAL ST_DumpAsPolygons(m.flood_raster) d
-                WHERE d.val >= 1
+                FROM flood_masks m
+                JOIN scenes s ON m.scene_id = s.scene_id
+                JOIN LATERAL ST_DumpAsPolygons(m.flood_raster) d ON true
+                WHERE d.val >= 1 {date_filter}
             )
             SELECT
                 w.ward AS ward_name,
@@ -327,7 +357,7 @@ async def get_ward_analytics():
               AND ST_Intersects(w.geom, f.geom)
             GROUP BY w.ward, w.county
             ORDER BY flooded_area_km2 DESC;
-        """)
+        """, *([date_obj] if date_obj else []))
         return {"wards": [dict(r) for r in rows]}
 
 @app.get("/api/v1/wards")
