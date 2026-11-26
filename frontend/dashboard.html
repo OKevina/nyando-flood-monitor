@@ -806,7 +806,7 @@
                                                 <circle cx={p.x} cy={p.y} r="2.5" fill="#1f2937" stroke="#ffffff" strokeWidth="1" />
                                                 {p.date === analytics?.peak_date && (
                                                     <text x={p.x} y={p.y - 4} fontSize="3.5" textAnchor="middle" fill="#4b5563" fontWeight="bold">
-                                                        peak ({p.val} km²)
+                                                        peak ({Number(p.val).toFixed(2)} km²)
                                                     </text>
                                                 )}
                                             </g>
